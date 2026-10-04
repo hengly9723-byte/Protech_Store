@@ -676,22 +676,140 @@ export default {
       }
     }
 
+    if (apiPath === "products" && method === "POST") {
+      const pid = crypto.randomUUID();
+      const brandObj = st.brands.find((b) => String(b.id) === String(body.brand)) || null;
+      const catObj = st.categories_flat.find((c) => String(c.id) === String(body.category)) || null;
+      const typeObj = st.product_types.find((t) => String(t.id) === String(body.type)) || st.product_types[0] || null;
+      const slug = body.slug || (body.name || "product").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const listRec = {
+        id: pid,
+        name: body.name || "",
+        slug,
+        sku: body.sku || "",
+        short_description: body.short_description || "",
+        base_price: String(body.base_price || "0.00"),
+        compare_at_price: String(body.compare_at_price || body.base_price || "0.00"),
+        currency: body.currency || "USD",
+        status: body.status || "active",
+        is_featured: Boolean(body.is_featured),
+        is_active: body.is_active !== false,
+        brand: brandObj?.id || body.brand || null,
+        brand_name: brandObj?.name || "",
+        category: catObj?.id || body.category || null,
+        category_name: catObj?.name || "",
+        type: typeObj?.id || body.type || null,
+        type_name: typeObj?.name || "Physical",
+        primary_image: null,
+        variants_count: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      const detailRec = {
+        ...listRec,
+        description: body.description || "",
+        cost_price: String(body.cost_price || "0.00"),
+        warranty_months: Number(body.warranty_months || 12),
+        weight: String(body.weight || "1.000"),
+        brand: brandObj,
+        category: catObj,
+        type: typeObj,
+        variants: [],
+        images: [],
+        specifications: [],
+      };
+      st.products.unshift(listRec);
+      st.product_details[pid] = detailRec;
+      st.product_details[slug] = detailRec;
+      await saveState(ctx);
+      return jsonResponse(detailRec, 201);
+    }
+
     const prodMatch = apiPath.match(/^products\/([^/]+)$/);
-    if (prodMatch && method === "GET") {
+    if (prodMatch) {
       const idOrSlug = prodMatch[1];
       const detail =
         st.product_details[idOrSlug] ||
         Object.values(st.product_details).find(
           (p) => String(p.id) === idOrSlug || String(p.slug) === idOrSlug
         );
-      if (!detail) return jsonResponse({ error: "Product not found." }, 404);
-      return jsonResponse(detail);
+      if (method === "GET") {
+        if (!detail) return jsonResponse({ error: "Product not found." }, 404);
+        return jsonResponse(detail);
+      }
+      if (method === "PATCH" || method === "PUT") {
+        if (!detail) return jsonResponse({ error: "Product not found." }, 404);
+        Object.assign(detail, body);
+        const listRec = st.products.find((p) => String(p.id) === String(detail.id));
+        if (listRec) Object.assign(listRec, body);
+        await saveState(ctx);
+        return jsonResponse(detail);
+      }
+      if (method === "DELETE") {
+        if (detail) {
+          delete st.product_details[detail.id];
+          delete st.product_details[detail.slug];
+        }
+        st.products = st.products.filter((p) => String(p.id) !== idOrSlug);
+        st.variants = st.variants.filter((v) => String(v.product) !== idOrSlug);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
     }
 
     // --- CATALOG: VARIANTS ---
     if (apiPath === "variants/generate-barcode" && method === "GET") {
       const randomDigits = Array.from({ length: 12 }, () => Math.floor(Math.random() * 10)).join("");
       return jsonResponse({ barcode: "2" + randomDigits.slice(1) });
+    }
+
+    if (apiPath === "variants" && method === "POST") {
+      const vid = crypto.randomUUID();
+      const prodDetail = st.product_details[body.product] || {};
+      const newVar = {
+        id: vid,
+        product: body.product,
+        product_name: prodDetail.name || body.name || "",
+        product_slug: prodDetail.slug || "",
+        brand_id: prodDetail.brand?.id || null,
+        brand_name: prodDetail.brand?.name || "",
+        category_id: prodDetail.category?.id || null,
+        category_name: prodDetail.category?.name || "",
+        sku: body.sku || "",
+        barcode: body.barcode || "",
+        name: body.name || prodDetail.name || "",
+        price: String(body.price || prodDetail.base_price || "0.00"),
+        cost_price: String(body.cost_price || "0.00"),
+        compare_at_price: String(body.compare_at_price || body.price || "0.00"),
+        weight: String(body.weight || "1.000"),
+        status: body.status || "active",
+        specifications: body.specifications || {},
+        images: [],
+        primary_image: prodDetail.images?.[0] || null,
+        in_stock: true,
+        stock_quantity: 25,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      st.variants.unshift(newVar);
+      st.variant_details[vid] = newVar;
+      if (prodDetail.variants) prodDetail.variants.push(newVar);
+      st.stock.push({
+        id: crypto.randomUUID(),
+        variant: vid,
+        variant_sku: newVar.sku,
+        variant_name: newVar.name,
+        product_name: newVar.product_name,
+        quantity_available: 25,
+        quantity_reserved: 0,
+        quantity_damaged: 0,
+        reorder_level: 5,
+        is_low_stock: false,
+        in_stock: true,
+        updated_at: new Date().toISOString(),
+      });
+      await saveState(ctx);
+      return jsonResponse(newVar, 201);
     }
 
     if (apiPath === "variants" && method === "GET") {
@@ -788,44 +906,284 @@ export default {
     }
 
     const varMatch = apiPath.match(/^variants\/([^/]+)$/);
-    if (varMatch && method === "GET") {
+    if (varMatch) {
       const vid = varMatch[1];
       const v =
         st.variant_details[vid] ||
         st.variants.find((x) => String(x.id) === vid || String(x.sku) === vid);
-      if (!v) return jsonResponse({ error: "Variant not found." }, 404);
-      return jsonResponse(v);
+      if (method === "GET") {
+        if (!v) return jsonResponse({ error: "Variant not found." }, 404);
+        return jsonResponse(v);
+      }
+      if (method === "PATCH" || method === "PUT") {
+        if (v) Object.assign(v, body);
+        const vList = st.variants.find((x) => String(x.id) === vid);
+        if (vList) Object.assign(vList, body);
+        await saveState(ctx);
+        return jsonResponse(v || {});
+      }
+      if (method === "DELETE") {
+        delete st.variant_details[vid];
+        st.variants = st.variants.filter((x) => String(x.id) !== vid);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
+    }
+
+    if (apiPath === "product-images") {
+      if (method === "GET") {
+        const pid = url.searchParams.get("product");
+        const prod = st.product_details[pid];
+        return jsonResponse(prod?.images || []);
+      }
+      if (method === "POST") {
+        const img = {
+          id: crypto.randomUUID(),
+          product: body.product,
+          variant: body.variant || null,
+          image_url: body.image_url || "",
+          alt_text: body.alt_text || "",
+          sort_order: Number(body.sort_order || 1),
+          is_primary: Boolean(body.is_primary),
+          created_at: new Date().toISOString(),
+        };
+        const prod = st.product_details[body.product];
+        if (prod) {
+          prod.images = [...(prod.images || []), img];
+          const pList = st.products.find((p) => String(p.id) === String(body.product));
+          if (pList && (!pList.primary_image || img.is_primary)) {
+            pList.primary_image = img;
+          }
+        }
+        await saveState(ctx);
+        return jsonResponse(img, 201);
+      }
+    }
+    const prodImgMatch = apiPath.match(/^product-images\/([^/]+)$/);
+    if (prodImgMatch && method === "DELETE") {
+      const iid = prodImgMatch[1];
+      for (const p of Object.values(st.product_details)) {
+        if (p.images) p.images = p.images.filter((i) => String(i.id) !== iid);
+      }
+      await saveState(ctx);
+      return jsonResponse({ deleted: true });
     }
 
     // --- CATEGORIES, BRANDS, PRODUCT TYPES, SPECS ---
-    if (apiPath === "categories" && method === "GET") {
-      const allFlat = url.searchParams.get("all_flat");
-      return jsonResponse(
-        allFlat === "true" || allFlat === "1" ? st.categories_flat : st.categories
-      );
+    if (apiPath === "categories") {
+      if (method === "GET") {
+        const allFlat = url.searchParams.get("all_flat");
+        return jsonResponse(
+          allFlat === "true" || allFlat === "1" ? st.categories_flat : st.categories
+        );
+      }
+      if (method === "POST") {
+        const cat = {
+          id: crypto.randomUUID(),
+          parent: body.parent || null,
+          name: body.name || "",
+          slug: body.slug || (body.name || "").toLowerCase().replace(/\s+/g, "-"),
+          description: body.description || "",
+          image_url: body.image_url || "",
+          is_active: body.is_active !== false,
+          sort_order: Number(body.sort_order || 1),
+          children: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        st.categories_flat.push(cat);
+        if (!cat.parent) st.categories.push(cat);
+        await saveState(ctx);
+        return jsonResponse(cat, 201);
+      }
     }
-    if (apiPath === "brands" && method === "GET") {
-      return jsonResponse(st.brands);
+    const catMatch = apiPath.match(/^categories\/([^/]+)$/);
+    if (catMatch) {
+      const cid = catMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const c = st.categories_flat.find((x) => String(x.id) === cid);
+        if (c) Object.assign(c, body);
+        const cRoot = st.categories.find((x) => String(x.id) === cid);
+        if (cRoot) Object.assign(cRoot, body);
+        await saveState(ctx);
+        return jsonResponse(c || {});
+      }
+      if (method === "DELETE") {
+        st.categories_flat = st.categories_flat.filter((x) => String(x.id) !== cid);
+        st.categories = st.categories.filter((x) => String(x.id) !== cid);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
     }
+
+    if (apiPath === "brands") {
+      if (method === "GET") return jsonResponse(st.brands);
+      if (method === "POST") {
+        const b = {
+          id: crypto.randomUUID(),
+          name: body.name || "",
+          slug: body.slug || (body.name || "").toLowerCase().replace(/\s+/g, "-"),
+          description: body.description || "",
+          logo_url: body.logo_url || "",
+          website_url: body.website_url || "",
+          is_active: body.is_active !== false,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        st.brands.push(b);
+        await saveState(ctx);
+        return jsonResponse(b, 201);
+      }
+    }
+    const brandMatch = apiPath.match(/^brands\/([^/]+)$/);
+    if (brandMatch) {
+      const bid = brandMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const b = st.brands.find((x) => String(x.id) === bid);
+        if (b) Object.assign(b, body);
+        await saveState(ctx);
+        return jsonResponse(b || {});
+      }
+      if (method === "DELETE") {
+        st.brands = st.brands.filter((x) => String(x.id) !== bid);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
+    }
+
     if (apiPath === "product-types" && method === "GET") {
       return jsonResponse(st.product_types);
     }
-    if (apiPath === "specification-definitions" && method === "GET") {
-      return jsonResponse(st.spec_definitions);
+    if (apiPath === "specification-definitions") {
+      if (method === "GET") return jsonResponse(st.spec_definitions);
+      if (method === "POST") {
+        const def = { id: crypto.randomUUID(), ...body };
+        st.spec_definitions.push(def);
+        await saveState(ctx);
+        return jsonResponse(def, 201);
+      }
     }
-    if (apiPath === "specification-options" && method === "GET") {
-      return jsonResponse(st.spec_options);
+    if (apiPath === "specification-options") {
+      if (method === "GET") {
+        const defId = url.searchParams.get("definition");
+        const opts = defId
+          ? st.spec_options.filter((o) => String(o.definition) === String(defId))
+          : st.spec_options;
+        return jsonResponse(opts);
+      }
+      if (method === "POST") {
+        const opt = { id: crypto.randomUUID(), ...body };
+        st.spec_options.push(opt);
+        await saveState(ctx);
+        return jsonResponse(opt, 201);
+      }
+    }
+    const specOptMatch = apiPath.match(/^specification-options\/([^/]+)$/);
+    if (specOptMatch) {
+      const oid = specOptMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const o = st.spec_options.find((x) => String(x.id) === oid);
+        if (o) Object.assign(o, body);
+        await saveState(ctx);
+        return jsonResponse(o || {});
+      }
+      if (method === "DELETE") {
+        st.spec_options = st.spec_options.filter((x) => String(x.id) !== oid);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
     }
 
     // --- PROMOTIONS & DISCOUNT CODES ---
     if (apiPath === "promotions/active" && method === "GET") {
       return jsonResponse(st.promotions_active);
     }
-    if (apiPath === "promotions" && method === "GET") {
-      return jsonResponse(st.promotions);
+    if (apiPath === "promotions") {
+      if (method === "GET") return jsonResponse(st.promotions);
+      if (method === "POST") {
+        const pIds = body.product_ids || [];
+        const matchedProds = st.products.filter((p) => pIds.includes(p.id));
+        const promo = {
+          id: crypto.randomUUID(),
+          name: body.name || "",
+          description: body.description || "",
+          type: body.type || "seasonal",
+          banner_image_url: body.banner_image_url || body.bannerImageUrl || "",
+          bannerImageUrl: body.bannerImageUrl || body.banner_image_url || "",
+          discount_type: body.discount_type || body.discountType || "percentage",
+          discountType: body.discountType || body.discount_type || "percentage",
+          discount_value: String(body.discount_value ?? body.discountValue ?? "0.00"),
+          discountValue: String(body.discountValue ?? body.discount_value ?? "0.00"),
+          starts_at: body.starts_at || new Date().toISOString(),
+          ends_at: body.ends_at || null,
+          is_active: body.is_active !== false,
+          products: matchedProds,
+          featuredProducts: matchedProds,
+          products_count: matchedProds.length,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        st.promotions.unshift(promo);
+        st.promotions_active = st.promotions.filter((p) => p.is_active);
+        await saveState(ctx);
+        return jsonResponse(promo, 201);
+      }
     }
-    if (apiPath === "discount-codes" && method === "GET") {
-      return jsonResponse(st.discount_codes);
+    const promoMatch = apiPath.match(/^promotions\/([^/]+)$/);
+    if (promoMatch) {
+      const pid = promoMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const promo = st.promotions.find((p) => String(p.id) === pid);
+        if (promo) {
+          Object.assign(promo, body);
+          if (body.product_ids) {
+            const matchedProds = st.products.filter((p) => body.product_ids.includes(p.id));
+            promo.products = matchedProds;
+            promo.featuredProducts = matchedProds;
+            promo.products_count = matchedProds.length;
+          }
+          st.promotions_active = st.promotions.filter((p) => p.is_active);
+        }
+        await saveState(ctx);
+        return jsonResponse(promo || {});
+      }
+      if (method === "DELETE") {
+        st.promotions = st.promotions.filter((p) => String(p.id) !== pid);
+        st.promotions_active = st.promotions.filter((p) => p.is_active);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
+    }
+
+    if (apiPath === "discount-codes") {
+      if (method === "GET") return jsonResponse(st.discount_codes);
+      if (method === "POST") {
+        const dc = {
+          id: crypto.randomUUID(),
+          usage_count: 0,
+          is_active: true,
+          ...body,
+          created_at: new Date().toISOString(),
+        };
+        st.discount_codes.unshift(dc);
+        await saveState(ctx);
+        return jsonResponse(dc, 201);
+      }
+    }
+    const dcMatch = apiPath.match(/^discount-codes\/([^/]+)$/);
+    if (dcMatch && dcMatch[1] !== "validate") {
+      const dcid = dcMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const dc = st.discount_codes.find((d) => String(d.id) === dcid);
+        if (dc) Object.assign(dc, body);
+        await saveState(ctx);
+        return jsonResponse(dc || {});
+      }
+      if (method === "DELETE") {
+        st.discount_codes = st.discount_codes.filter((d) => String(d.id) !== dcid);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
     }
     if (apiPath === "discount-codes/validate" && method === "POST") {
       const codeStr = String(body.code || "").trim().toUpperCase();
@@ -1098,12 +1456,65 @@ export default {
     }
 
     if (apiPath === "orders" && method === "GET") {
-      return jsonResponse({
-        count: st.orders.length,
-        next: null,
-        previous: null,
-        results: st.orders,
-      });
+      let list = [...st.orders];
+      const stFilter = url.searchParams.get("status");
+      const payFilter = url.searchParams.get("payment_status");
+      if (stFilter) list = list.filter((o) => o.status === stFilter);
+      if (payFilter) list = list.filter((o) => o.payment_status === payFilter);
+      return jsonResponse(list);
+    }
+
+    const orderStatusMatch = apiPath.match(/^orders\/([^/]+)\/status$/);
+    if (orderStatusMatch && (method === "PATCH" || method === "PUT")) {
+      const oid = orderStatusMatch[1];
+      const ord = st.orders.find((o) => String(o.id) === oid);
+      if (!ord) return jsonResponse({ error: "Order not found." }, 404);
+      if (body.status) ord.status = body.status;
+      if (body.fulfillment_status) ord.fulfillment_status = body.fulfillment_status;
+      if (body.payment_status) ord.payment_status = body.payment_status;
+      ord.updated_at = new Date().toISOString();
+      await saveState(ctx);
+      return jsonResponse({ message: "Order status updated.", order: ord });
+    }
+
+    const orderShipMatch = apiPath.match(/^orders\/([^/]+)\/ship$/);
+    if (orderShipMatch && method === "POST") {
+      const oid = orderShipMatch[1];
+      const ord = st.orders.find((o) => String(o.id) === oid);
+      if (!ord) return jsonResponse({ error: "Order not found." }, 404);
+      const shipment = {
+        id: crypto.randomUUID(),
+        order: ord.id,
+        carrier: body.carrier || "Standard Courier",
+        tracking_number: body.tracking_number || "",
+        status: body.status || "shipped",
+        shipped_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+      ord.shipments = [shipment, ...(ord.shipments || [])];
+      ord.fulfillment_status = "fulfilled";
+      ord.status = "completed";
+      await saveState(ctx);
+      return jsonResponse({ message: "Shipment created.", shipment, order: ord });
+    }
+
+    const orderRefundMatch = apiPath.match(/^orders\/([^/]+)\/refund$/);
+    if (orderRefundMatch && method === "POST") {
+      const oid = orderRefundMatch[1];
+      const ord = st.orders.find((o) => String(o.id) === oid);
+      if (!ord) return jsonResponse({ error: "Order not found." }, 404);
+      const refund = {
+        id: crypto.randomUUID(),
+        order: ord.id,
+        amount: String(body.amount || ord.total),
+        reason: body.reason || "",
+        status: "completed",
+        created_at: new Date().toISOString(),
+      };
+      ord.refunds = [refund, ...(ord.refunds || [])];
+      ord.payment_status = "refunded";
+      await saveState(ctx);
+      return jsonResponse({ message: "Refund processed.", refund, order: ord });
     }
 
     const orderMatch = apiPath.match(/^orders\/([^/]+)$/);
@@ -1194,9 +1605,31 @@ export default {
       });
     }
 
-    // --- ADMIN ENDPOINTS ---
+    // --- ADMIN CRUD ENDPOINTS ---
+    const stockAdjustMatch = apiPath.match(/^stock\/([^/]+)\/adjust$/);
+    if (stockAdjustMatch && method === "POST") {
+      const vid = stockAdjustMatch[1];
+      let s = st.stock.find((x) => String(x.variant) === vid);
+      const delta = parseInt(body.quantity || 0, 10);
+      if (s) {
+        s.quantity_available = Math.max(0, Number(s.quantity_available || 0) + delta);
+        s.in_stock = s.quantity_available > 0;
+        s.updated_at = new Date().toISOString();
+      }
+      await saveState(ctx);
+      return jsonResponse(s || { variant: vid, quantity_available: Math.max(0, delta) });
+    }
+
     if (apiPath === "users" && method === "GET") {
       return jsonResponse(st.users);
+    }
+    const userMatch = apiPath.match(/^users\/([^/]+)$/);
+    if (userMatch && (method === "PATCH" || method === "PUT")) {
+      const uid = userMatch[1];
+      const u = st.users.find((x) => String(x.id) === uid);
+      if (u) Object.assign(u, body);
+      await saveState(ctx);
+      return jsonResponse(u || {});
     }
     if (apiPath === "roles" && method === "GET") {
       return jsonResponse(st.roles);
@@ -1205,7 +1638,7 @@ export default {
       return jsonResponse(Object.values(st.reviews).flat());
     }
     if (apiPath === "audit-logs" && method === "GET") {
-      return jsonResponse({ count: 0, results: [] });
+      return jsonResponse({ count: st.audit_logs.length, next: null, previous: null, results: st.audit_logs });
     }
 
     return jsonResponse({ error: `Endpoint /api/${apiPath} not found.` }, 404);

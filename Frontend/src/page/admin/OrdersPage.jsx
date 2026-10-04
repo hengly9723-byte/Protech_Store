@@ -48,7 +48,7 @@ const OrdersPage = () => {
       if (status) params.status = status;
       if (payment) params.payment_status = payment;
       const res = await getAdminOrdersApi(params);
-      setOrders(res.data);
+      setOrders(Array.isArray(res.data) ? res.data : res.data?.results || []);
     } catch (err) {
       console.error(err);
     } finally {

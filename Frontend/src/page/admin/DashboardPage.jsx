@@ -44,10 +44,12 @@ const DashboardPage = () => {
         getLowStockApi(),
         getAdminReviewsApi({ status: "pending" }),
       ]);
-      setOrders(ordersRes.data);
+      const ordersData = Array.isArray(ordersRes.data) ? ordersRes.data : ordersRes.data?.results || [];
+      setOrders(ordersData);
       const lowData = Array.isArray(lowRes.data) ? lowRes.data : lowRes.data?.results || [];
       setLowStock(lowData);
-      setPendingReviews(reviewRes.data);
+      const revData = Array.isArray(reviewRes.data) ? reviewRes.data : reviewRes.data?.results || [];
+      setPendingReviews(revData);
     } catch (err) {
       console.error("Failed to load dashboard data", err);
     } finally {
