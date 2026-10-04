@@ -186,5 +186,16 @@ class PromotionSerializer(serializers.ModelSerializer):
 
         return super().to_internal_value(data)
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        request = self.context.get('request')
+        banner_url = ret.get('banner_image_url')
+        if request and banner_url and '/media/' in banner_url:
+            media_path = '/media/' + banner_url.split('/media/', 1)[1]
+            resolved_url = request.build_absolute_uri(media_path)
+            ret['banner_image_url'] = resolved_url
+            ret['bannerImageUrl'] = resolved_url
+        return ret
+
     def get_products_count(self, obj):
         return obj.products.count()

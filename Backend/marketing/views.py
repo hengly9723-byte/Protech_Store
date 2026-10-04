@@ -271,7 +271,7 @@ class PromotionViewSet(viewsets.ModelViewSet):
             'products__variants'
         )
 
-        serializer = PromotionSerializer(active_promos, many=True)
+        serializer = PromotionSerializer(active_promos, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(

@@ -264,6 +264,8 @@ CSRF_TRUSTED_ORIGINS = [
     "https://*.trycloudflare.com",
 ]
 
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 CORS_ALLOW_HEADERS = list(default_headers) + [
     'bypass-tunnel-reminder',
     'ngrok-skip-browser-warning',

@@ -42,6 +42,7 @@ static_cdn/
 .env
 .env.[a-zA-Z]*
 *.env
+!Frontend/.env.production
 certs/
 secrets/
 
