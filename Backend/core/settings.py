@@ -244,7 +244,8 @@ CORS_ALLOWED_ORIGINS = [
     "https://protech-tau-sepia.vercel.app",
     "https://protech-2s0ekwa6n-sokheng-s-projects.vercel.app",
     "https://protech-dy5.pages.dev",
-    "https://17b35fba.protech-dy5.pages.dev"
+    "https://17b35fba.protech-dy5.pages.dev",
+    "https://protech-store.hengly9723.workers.dev",
 ]
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -259,12 +260,14 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 
 CSRF_TRUSTED_ORIGINS = [
     "https://protech-dy5.pages.dev",
+    "https://protech-store.hengly9723.workers.dev",
     "https://*.pages.dev",
     "https://*.workers.dev",
     "https://*.trycloudflare.com",
 ]
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_CROSS_ORIGIN_OPENER_POLICY = 'same-origin-allow-popups'
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     'bypass-tunnel-reminder',
