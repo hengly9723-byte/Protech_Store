@@ -30,6 +30,8 @@ dist/
 
 # Ignore dynamic user-uploaded media files
 media/
+!Frontend/public/media/
+!Frontend/public/media/**
 
 # Ignore gathered static assets (don't commit your collected static files)
 staticfiles/
