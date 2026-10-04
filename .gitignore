@@ -1,0 +1,73 @@
+# ==========================================
+# Python Core & Byte-compiled Files
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ==========================================
+# Virtual Environments & Package Managers
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+.python-version
+pip-log.txt
+*.egg-info/
+.installed.cfg
+*.egg
+node_modules/
+dist/
+.ruff_cache/
+
+# ==========================================
+# Django Specific Exclusions
+# ==========================================
+# Ignore local SQLite database (uncomment if you want to commit a skeleton DB)
+*.sqlite3
+
+# Ignore dynamic user-uploaded media files
+media/
+
+# Ignore gathered static assets (don't commit your collected static files)
+staticfiles/
+static_cdn/
+
+# ==========================================
+# Configuration & Secrets
+# ==========================================
+# NEVER commit credentials or secret keys
+.env
+.env.[a-zA-Z]*
+*.env
+certs/
+secrets/
+
+# ==========================================
+# IDEs and Editors
+# ==========================================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# Testing & Code Quality
+# ==========================================
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/

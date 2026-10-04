@@ -1,0 +1,12 @@
+Django>=4.2
+djangorestframework
+django-cors-headers
+dj-database-url
+python-dotenv
+python-decouple
+djangorestframework-simplejwt
+psycopg2-binary
+google-auth
+requests
+gunicorn
+whitenoise

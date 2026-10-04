@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Bitcount+Prop+Single:wght@100..900&family=Changa+One:ital@0;1&family=Doto:wght@100..900&family=Great+Vibes&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Kantumruy+Pro:ital,wght@0,100..700;1,100..700&family=Montserrat:ital,wght@0,100..900;1,100..900&family=Orbitron:wght@400..900&family=Press+Start+2P&family=Roboto:ital,wght@0,100..900;1,100..900&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&family=Titan+One&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+    --font-orbitron: "Orbitron", sans-serif;
+    --font-thermal: "Space Mono", "Courier New", Courier, monospace;
+
+    --color-primary: #ff7039;
+    --color-background: #FFFFFF;
+    --color-button: #000000;
+    --color-button-hover: #27272A;
+    --color-bg-button: #ffc2aa23;
+}
+
+.font-thermal {
+    font-family: 'Space Mono', 'Courier New', Courier, monospace;
+}
+
+@layer base {
+    html {
+        scroll-behavior: smooth;
+    }
+    body {
+        background-color: var(--color-background);
+    }
+}
