@@ -249,6 +249,7 @@ CORS_ALLOWED_ORIGINS = [
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.pages\.dev$",
+    r"^https://.*\.workers\.dev$",
     r"^https://.*\.vercel\.app$",
     r"^https://.*\.loca\.lt$",
     r"^https://.*\.ngrok-free\.app$",
@@ -259,6 +260,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CSRF_TRUSTED_ORIGINS = [
     "https://protech-dy5.pages.dev",
     "https://*.pages.dev",
+    "https://*.workers.dev",
     "https://*.trycloudflare.com",
 ]
 
