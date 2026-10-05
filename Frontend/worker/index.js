@@ -427,6 +427,22 @@ async function ensureD1(db) {
         ),
       ]);
     }
+    const paidOrderCheck = await db
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'paid_order_0500ae48_20261005'")
+      .first();
+    if (!paidOrderCheck) {
+      await db.batch([
+        db.prepare(
+          "UPDATE payments SET status = 'paid', paid_at = datetime('now'), updated_at = datetime('now') WHERE transaction_id = 'da563c2f03292e5f563a0c433f0c3448'"
+        ),
+        db.prepare(
+          "UPDATE orders SET payment_status = 'paid', status = 'processing', updated_at = datetime('now') WHERE id = '0500ae48-37bf-4f66-9584-828e4be993ef'"
+        ),
+        db.prepare(
+          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('paid_order_0500ae48_20261005', datetime('now'))"
+        ),
+      ]);
+    }
     schemaInitialized = true;
   } catch (err) {
     console.error("D1 schema init error:", err);
@@ -569,44 +585,53 @@ let bakongToken =
 
 async function checkBakongMd5(md5Hash) {
   const baseUrl = "https://api-bakong.nbc.gov.kh";
+  const reqHeaders = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/plain, */*",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    Authorization: `Bearer ${bakongToken}`,
+  };
   try {
     let resp = await fetch(`${baseUrl}/v1/check_transaction_by_md5`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bakongToken}`,
-        "X-Device-Id": "protech-cloudflare-worker",
-        "X-Request-Id": crypto.randomUUID(),
-      },
+      headers: reqHeaders,
       body: JSON.stringify({ md5: md5Hash }),
     });
-    let data = await resp.json().catch(() => ({}));
+    let rawText = await resp.text();
+    let data = safeJsonParse(rawText, {});
     if (resp.status === 401 || data?.errorCode === 6) {
       const renewResp = await fetch(`${baseUrl}/v1/renew_token`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": reqHeaders["User-Agent"],
+        },
         body: JSON.stringify({ email: "hengly9723@gmail.com" }),
       });
       const renewData = await renewResp.json().catch(() => ({}));
       if (renewData?.data?.token) {
         bakongToken = renewData.data.token;
+        reqHeaders.Authorization = `Bearer ${bakongToken}`;
         resp = await fetch(`${baseUrl}/v1/check_transaction_by_md5`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${bakongToken}`,
-            "X-Device-Id": "protech-cloudflare-worker",
-            "X-Request-Id": crypto.randomUUID(),
-          },
+          headers: reqHeaders,
           body: JSON.stringify({ md5: md5Hash }),
         });
-        data = await resp.json().catch(() => ({}));
+        rawText = await resp.text();
+        data = safeJsonParse(rawText, {});
       }
     }
     const paid = data?.responseCode === 0 && Boolean(data?.data);
-    return { paid, response_code: data?.responseCode ?? null, raw: data };
+    return {
+      paid,
+      http_status: resp.status,
+      response_code: data?.responseCode ?? null,
+      raw: data,
+      raw_text: resp.status >= 400 ? rawText.slice(0, 300) : undefined,
+    };
   } catch (e) {
-    return { paid: false, response_code: null, error: String(e) };
+    return { paid: false, http_status: null, response_code: null, error: String(e) };
   }
 }
 
@@ -3561,13 +3586,16 @@ export default {
 
     if (apiPath === "payments/khqr/check-status" && method === "GET") {
       const md5Hash = url.searchParams.get("md5");
+      const forceDebug = url.searchParams.get("debug_bakong") === "1";
       const payRow = await db
         .prepare("SELECT * FROM payments WHERE transaction_id = ? LIMIT 1")
         .bind(md5Hash)
         .first();
-      const res = await checkBakongMd5(md5Hash);
+      const alreadyPaid = payRow?.status === "paid";
+      const res = (!alreadyPaid || forceDebug) ? await checkBakongMd5(md5Hash) : { paid: true };
+      const isPaid = Boolean(alreadyPaid || res.paid);
       const now = new Date().toISOString();
-      if (res.paid && payRow) {
+      if (res.paid && payRow && !alreadyPaid) {
         await db.batch([
           db
             .prepare("UPDATE payments SET status = 'paid', paid_at = ?, updated_at = ? WHERE id = ?")
@@ -3583,8 +3611,10 @@ export default {
         ? await getOrdersHydrated(db, { orderIdOrNumber: payRow.order_id })
         : [];
       return jsonResponse({
-        paid: Boolean(res.paid),
-        status: res.paid ? "SUCCESS" : "PENDING",
+        paid: isPaid,
+        status: isPaid ? "SUCCESS" : "PENDING",
+        bakong_http_status: res.http_status ?? null,
+        bakong_raw: forceDebug ? res : undefined,
         order: ord || null,
       });
     }
@@ -3599,8 +3629,10 @@ export default {
       if (!md5Hash) {
         return jsonResponse({ paid: false, status: "PENDING", order: ord || null });
       }
-      const res = await checkBakongMd5(md5Hash);
-      if (res.paid && ord) {
+      const alreadyPaid = ord?.payment_status === "paid";
+      const res = alreadyPaid ? { paid: true } : await checkBakongMd5(md5Hash);
+      const isPaid = Boolean(alreadyPaid || res.paid);
+      if (res.paid && ord && !alreadyPaid) {
         const now = new Date().toISOString();
         await db.batch([
           db
@@ -3617,8 +3649,9 @@ export default {
       }
       const [freshOrd] = ord ? await getOrdersHydrated(db, { orderIdOrNumber: ord.id }) : [];
       return jsonResponse({
-        paid: Boolean(res.paid),
-        status: res.paid ? "SUCCESS" : "PENDING",
+        paid: isPaid,
+        status: isPaid ? "SUCCESS" : "PENDING",
+        bakong_http_status: res.http_status ?? null,
         order: freshOrd || null,
       });
     }
