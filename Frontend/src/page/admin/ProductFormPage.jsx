@@ -58,6 +58,8 @@ const emptyProduct = {
   brand_id: "",
   category_id: "",
   type_id: "",
+  reorder_level: 0,
+  reorderLevel: 0,
 };
 
 const HW_SPEC_KEYS = [
@@ -80,6 +82,8 @@ const emptyVariant = {
   compare_at_price: "",
   weight: "",
   status: "active",
+  reorder_level: 0,
+  reorderLevel: 0,
   specifications: emptyHwSpecs(), 
 };
 

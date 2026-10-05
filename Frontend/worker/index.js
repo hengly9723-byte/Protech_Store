@@ -162,7 +162,7 @@ const INIT_SQL_STATEMENTS = [
     quantity_available INTEGER NOT NULL DEFAULT 0,
     quantity_reserved INTEGER NOT NULL DEFAULT 0,
     quantity_damaged INTEGER NOT NULL DEFAULT 0,
-    reorder_level INTEGER NOT NULL DEFAULT 5,
+    reorder_level INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE TABLE IF NOT EXISTS stock_transactions (
@@ -413,6 +413,17 @@ async function ensureD1(db) {
         ),
         db.prepare(
           "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('reset_default_stock_20261005', datetime('now'))"
+        ),
+      ]);
+    }
+    const reorderZeroCheck = await db
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'reset_reorder_level_0_20261005'")
+      .first();
+    if (!reorderZeroCheck) {
+      await db.batch([
+        db.prepare("UPDATE stock SET reorder_level = 0 WHERE reorder_level = 5"),
+        db.prepare(
+          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('reset_reorder_level_0_20261005', datetime('now'))"
         ),
       ]);
     }
@@ -1984,9 +1995,15 @@ export default {
           .prepare(
             `INSERT INTO stock (
               id, variant_id, quantity_available, quantity_reserved, quantity_damaged, reorder_level, updated_at
-            ) VALUES (?, ?, ?, 0, 0, 5, ?)`
+            ) VALUES (?, ?, ?, 0, 0, ?, ?)`
           )
-          .bind(crypto.randomUUID(), vid, Number(body.stock_quantity ?? 0), now),
+          .bind(
+            crypto.randomUUID(),
+            vid,
+            Number(body.stock_quantity ?? 0),
+            Number(body.reorder_level ?? body.reorderLevel ?? 0),
+            now
+          ),
         db
           .prepare(
             `UPDATE products SET
@@ -2930,7 +2947,7 @@ export default {
 
       let list = (results || []).map((s) => {
         const avail = Number(s.quantity_available || 0);
-        const reorder = Number(s.reorder_level || 5);
+        const reorder = Number(s.reorder_level ?? 0);
         return {
           id: s.id,
           variant: s.variant_id,
@@ -3003,7 +3020,7 @@ export default {
         const sidNew = crypto.randomUUID();
         await db
           .prepare(
-            "INSERT INTO stock (id, variant_id, quantity_available, quantity_reserved, quantity_damaged, reorder_level, updated_at) VALUES (?, ?, 0, 0, 0, 5, ?)"
+            "INSERT INTO stock (id, variant_id, quantity_available, quantity_reserved, quantity_damaged, reorder_level, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?)"
           )
           .bind(sidNew, vid, now)
           .run();
