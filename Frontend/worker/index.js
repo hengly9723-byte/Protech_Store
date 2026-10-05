@@ -352,105 +352,56 @@ const INIT_SQL_STATEMENTS = [
     user_agent TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
-  `INSERT OR IGNORE INTO users (
-    id, email, password_hash, full_name, first_name, last_name, avatar_url,
-    role, status, is_active, is_staff, is_superuser, is_email_verified
-  ) VALUES (
-    '4ff01caf-621f-47e4-b19a-742afdad4f9d',
-    'hengly9723@gmail.com',
-    'pbkdf2_sha256$admin',
-    'Ly Sokheng',
-    'Ly',
-    'Sokheng',
-    'https://i.pinimg.com/736x/78/dd/11/78dd11c9091e82cd365499bbdb5918a9.jpg',
-    'admin',
-    'active',
-    1, 1, 1, 1
+  `CREATE TABLE IF NOT EXISTS _d1_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   )`,
-  `INSERT OR IGNORE INTO product_types (id, name, requires_shipping, requires_stock, description) VALUES
-    ('ebbc92bd-6490-4b3d-8f3e-208613a56448', 'Physical', 1, 1, 'Ships to the customer and tracked in stock, e.g. phones, laptops, accessories'),
-    ('40a2087e-4c94-42a8-911b-468403cf3cce', 'Digital', 0, 0, 'Delivered electronically, e.g. software license, e-book'),
-    ('6bb0b574-aa01-4285-b9fd-c3aeb35b8a5b', 'Service', 0, 0, 'A service rendered rather than a shipped item, e.g. installation, repair, warranty')`,
-  `INSERT OR IGNORE INTO brands (id, name, slug, description, logo_url, website_url, is_active) VALUES
-    ('0e9d2b74-a8cd-4bee-a425-468d503fb432', 'Apple', 'Apple', '', 'https://www.apple.com/assets-www/en_WW/mac/04_product_tile/large/mbp_14_16_028335cc2_2x.jpg', '', 1),
-    ('abeab198-4828-45b3-b311-7f0325ca34bd', 'Asus', 'Asus', '', 'https://dlcdnwebimgs.asus.com/gain/D293897B-7F67-4CC9-8C4E-7796764031C8/w717/h525/fwebp/w273', '', 1)`,
-  `INSERT OR IGNORE INTO categories (id, parent_id, name, slug, description, image_url, is_active, sort_order) VALUES
-    ('a39faaa8-5889-4f7d-b07f-9b142abbc7cb', NULL, 'Monitor', 'hardware-specs', NULL, NULL, 1, 2),
-    ('f708ef8f-0b49-498e-a38c-6aa611e9ac1e', NULL, 'laptop', 'laptop', '', 'https://dlcdnwebimgs.asus.com/gain/D293897B-7F67-4CC9-8C4E-7796764031C8/w717/h525/fwebp/w273', 1, 3),
-    ('74cb279e-b6fe-46ef-90fc-6f8137d108ef', 'f708ef8f-0b49-498e-a38c-6aa611e9ac1e', 'gaming laptop', 'gaming-laptop', '', 'https://dlcdnwebimgs.asus.com/gain/D293897B-7F67-4CC9-8C4E-7796764031C8/w717/h525/fwebp/w273', 1, 1)`,
-  `INSERT OR IGNORE INTO specification_definitions (id, category_id, name, slug, data_type, unit, is_filterable, is_required, sort_order) VALUES
-    ('5925b4e3-fba9-46a5-b347-01d8b66d531e', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'OS', 'os', 'text', NULL, 1, 0, 1),
-    ('5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'Processor', 'processor', 'text', NULL, 1, 0, 2),
-    ('76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'Graphics', 'graphics', 'text', NULL, 1, 0, 3),
-    ('d3096975-f6a1-417c-896b-b22f921930d9', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'RAM', 'ram', 'text', NULL, 1, 0, 4),
-    ('b2c2f529-b9ca-4020-90d2-ee41e05970f6', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'Storage', 'storage', 'text', NULL, 1, 0, 5),
-    ('d7004110-3f02-43b5-adfe-35ebf44003c2', 'a39faaa8-5889-4f7d-b07f-9b142abbc7cb', 'Display', 'display', 'text', NULL, 1, 0, 6)`,
-  `INSERT OR IGNORE INTO specification_options (id, definition_id, label, sort_order) VALUES
-    ('9992b025-11cf-4743-95de-b6ea77621c5b', '5925b4e3-fba9-46a5-b347-01d8b66d531e', 'Windows 11 Home', 1),
-    ('425e841a-067b-4943-8ae8-332830ed26d4', '5925b4e3-fba9-46a5-b347-01d8b66d531e', 'Windows 11 Pro', 2),
-    ('c50709cf-15bf-420d-a572-336f9477b07b', '5925b4e3-fba9-46a5-b347-01d8b66d531e', 'macOS Sequoia', 4),
-    ('6995c7fe-a217-4c3c-9bf6-b139b8eef445', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'AMD Ryzen 7 9800X3D', 1),
-    ('fc7bd0dc-28ff-4796-8f46-b3c3444a744a', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'Intel Core i5-14400F', 2),
-    ('c56ac9f6-f754-4841-b6d2-96d25b72dd96', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'AMD Ryzen 7 8845HS', 3),
-    ('d6a494e8-d5ae-45a5-9c44-b56f06c3838d', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'AMD Ryzen 9 9955HX', 4),
-    ('76cf7c2d-d189-433f-98ce-2073e5d6fc37', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'Apple M4', 4),
-    ('d687653d-8948-43f1-ac3d-9332bd32da3d', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'Apple M4 Pro', 5),
-    ('cc454b43-6a46-48d0-ae7e-a7c0d388b61d', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'AMD Ryzen™ AI MAX+ 395 Processor', 6),
-    ('e1785606-c2bf-4bf5-ba41-c141f2c02630', '5b8d32f8-6ec0-44b6-bed3-79e11f23df46', 'Intel Core Ultra 9 275HX', 6),
-    ('7ecca176-ac88-4360-a5c3-0e5d1b90fd48', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5090 Laptop GPU', 1),
-    ('784728f6-894b-40e4-99ef-9e3adb1cb8dd', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5080 Ti Laptop GPU', 2),
-    ('ba2a1350-342b-46de-bcc7-368423ff2931', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5080 Laptop GPU', 3),
-    ('2c015fd0-5dcd-4a89-8e30-c6b66b8f22be', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5070 Ti Laptop GPU', 4),
-    ('10ede5b8-438d-4970-ad8a-6bf6109f4b58', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5070 Laptop GPU', 5),
-    ('19cb9b11-e58c-4654-bf24-a36decb6cfdc', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5060 Laptop GPU', 6),
-    ('7febad63-dd60-4b71-941f-d6fe684d809b', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 5050 Laptop GPU', 7),
-    ('654a485a-7229-435c-ad9d-3da7ee84c9b2', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 4070 Super Ti Laptop GPU', 8),
-    ('7264419d-7caa-4511-ae2f-91af398f8a1e', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 4070 Super Laptop GPU', 9),
-    ('6a3f1b2c-7196-4635-a6c6-99738905fabc', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', '10-core GPU', 10),
-    ('e7bcc8d1-d80c-4568-b8db-1eca4e7b2ef5', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 4070 Laptop GPU', 10),
-    ('27255192-9b12-4af1-a384-1a280fd899c8', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 4060 Ti (8GB) Laptop GPU', 11),
-    ('15375ea2-3a8a-44ab-92b5-b1659fea6e72', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 4060 Laptop GPU', 13),
-    ('689e0c2d-34c1-47b8-a131-613894b1b7ea', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'NVIDIA® GeForce RTX™ 3050 Laptop GPU', 14),
-    ('f0c719b8-04ed-4bdd-ab2c-823381d6b7a8', '76dcd0f9-20ac-4da1-a1b1-4aab8c196e81', 'AMD XDNA™ NPU up to 50TOPS', 15),
-    ('c9e26b07-2da3-4749-986f-56ec90952a8f', 'd3096975-f6a1-417c-896b-b22f921930d9', '8 GB DDR4', 1),
-    ('8a79cb8c-15ae-4d56-8736-6e911258c763', 'd3096975-f6a1-417c-896b-b22f921930d9', '16 GB DDR5', 2),
-    ('e1a26ff8-4bd1-4aba-a6f8-4b099d3e1256', 'd3096975-f6a1-417c-896b-b22f921930d9', '32 GB DDR5', 3),
-    ('4cc2ec70-272f-43d8-b9a9-b68f320cfed7', 'd3096975-f6a1-417c-896b-b22f921930d9', '64 GB DDR5', 4),
-    ('cc7f0e4c-b8b8-48d6-bb11-5e9e1ee29831', 'b2c2f529-b9ca-4020-90d2-ee41e05970f6', '256 GB SSD', 1),
-    ('fc34b879-1362-4560-82a5-1be1f48ff8af', 'b2c2f529-b9ca-4020-90d2-ee41e05970f6', '512 GB SSD', 2),
-    ('27c2d15a-d254-4404-89d9-a0529d611da5', 'b2c2f529-b9ca-4020-90d2-ee41e05970f6', '1 TB NVMe SSD', 3),
-    ('d601f744-a8a7-4d0b-bd31-3bbb71e9fb00', 'b2c2f529-b9ca-4020-90d2-ee41e05970f6', '2 TB NVMe SSD', 4),
-    ('92bf5347-6db5-419d-ad16-9a2f37ce2601', 'd7004110-3f02-43b5-adfe-35ebf44003c2', '14" FHD IPS 60 Hz', 1),
-    ('ac5aa8d8-6e50-49be-bec0-459af254779e', 'd7004110-3f02-43b5-adfe-35ebf44003c2', '15.6" FHD IPS 144 Hz', 2),
-    ('fa4f7742-d8c4-4c7c-ad70-d7771a1297fc', 'd7004110-3f02-43b5-adfe-35ebf44003c2', '16" QHD+ 240 Hz', 3),
-    ('b0eefc50-197a-4dad-af26-1692bbe6602c', 'd7004110-3f02-43b5-adfe-35ebf44003c2', '18" 4K OLED 120 Hz', 4),
-    ('1d843db0-eac2-4872-ad3c-ae8b0a9b8945', 'd7004110-3f02-43b5-adfe-35ebf44003c2', '13.4" 2.5K (2560 x 1600, WQXGA) 16:10 180Hz ROG', 6)`,
-  `INSERT OR IGNORE INTO shipping_config (id, free_shipping_threshold, flat_rate) VALUES (1, '50.00', '0.01')`,
-  `INSERT OR IGNORE INTO promotions (
-    id, name, description, type, banner_image_url, discount_type, discount_value, starts_at, ends_at, is_active
-  ) VALUES (
-    '06c913d0-9e3d-4b90-941a-9455ebb356c1',
-    'Pchum Ben',
-    'Level up your battle station with high-performance desktop hardware, next-gen GPUs, and elite gaming peripherals at limited-time promotional pricing.',
-    'seasonal',
-    '/media/banners/banner_f81c380d7b65.png',
-    'percentage',
-    '20.00',
-    '2026-10-02T02:49:00Z',
-    '2026-10-30T09:18:00Z',
-    1
-  )`,
+];
+
+const WIPE_ALL_TABLES_SQL = [
+  `DELETE FROM audit_logs`,
+  `DELETE FROM promotion_products`,
+  `DELETE FROM promotions`,
+  `DELETE FROM discount_codes`,
+  `DELETE FROM shipping_config`,
+  `DELETE FROM reviews`,
+  `DELETE FROM returns`,
+  `DELETE FROM shipments`,
+  `DELETE FROM refunds`,
+  `DELETE FROM payments`,
+  `DELETE FROM order_items`,
+  `DELETE FROM orders`,
+  `DELETE FROM wishlist_items`,
+  `DELETE FROM wishlists`,
+  `DELETE FROM cart_items`,
+  `DELETE FROM carts`,
+  `DELETE FROM stock_transactions`,
+  `DELETE FROM stock`,
+  `DELETE FROM product_specifications`,
+  `DELETE FROM specification_options`,
+  `DELETE FROM specification_definitions`,
+  `DELETE FROM product_images`,
+  `DELETE FROM product_variants`,
+  `DELETE FROM products`,
+  `DELETE FROM categories`,
+  `DELETE FROM product_types`,
+  `DELETE FROM brands`,
+  `DELETE FROM addresses`,
+  `DELETE FROM roles`,
+  `DELETE FROM users`,
+  `INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('clean_wipe_20261005', datetime('now'))`,
 ];
 
 async function ensureD1(db) {
   await db.prepare("PRAGMA foreign_keys = ON").run();
   if (schemaInitialized) return;
   try {
-    const check = await db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='products'")
+    await db.batch(INIT_SQL_STATEMENTS.map((sql) => db.prepare(sql)));
+    const wipeCheck = await db
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'clean_wipe_20261005'")
       .first();
-    if (!check) {
-      await db.batch(INIT_SQL_STATEMENTS.map((sql) => db.prepare(sql)));
+    if (!wipeCheck) {
+      await db.batch(WIPE_ALL_TABLES_SQL.map((sql) => db.prepare(sql)));
     }
     schemaInitialized = true;
   } catch (err) {
@@ -1075,7 +1026,7 @@ function getVariantPromoPrice(variant, activePromos) {
   };
 }
 
-async function getOrCreateCart(db, user, sessionId) {
+async function getOrCreateCart(db, user, sessionId, createIfMissing = true) {
   let cart = null;
   if (user) {
     cart = await db
@@ -1089,7 +1040,7 @@ async function getOrCreateCart(db, user, sessionId) {
       .bind(sessionId)
       .first();
   }
-  if (!cart) {
+  if (!cart && createIfMissing) {
     const cid = crypto.randomUUID();
     const now = new Date().toISOString();
     await db
@@ -1113,7 +1064,21 @@ async function getOrCreateCart(db, user, sessionId) {
 
 async function buildCartResponseD1(db, user, request) {
   const sid = request.headers.get("X-Session-ID") || "default_guest";
-  const cart = await getOrCreateCart(db, user, sid);
+  const cart = await getOrCreateCart(db, user, sid, false);
+  if (!cart) {
+    return {
+      id: null,
+      user: user ? user.id : null,
+      session_id: sid,
+      status: "active",
+      currency: "USD",
+      total_items: 0,
+      subtotal: "0.00",
+      items: [],
+      created_at: null,
+      updated_at: new Date().toISOString(),
+    };
+  }
   const [{ results: itemRows }, catalog, allPromos] = await Promise.all([
     db
       .prepare("SELECT * FROM cart_items WHERE cart_id = ? ORDER BY created_at ASC")
@@ -1488,18 +1453,7 @@ export default {
       const resetToken = crypto.randomUUID().replace(/-/g, "");
       const expires = new Date(Date.now() + 3600 * 1000).toISOString();
       const now = new Date().toISOString();
-      let row = await db.prepare("SELECT * FROM users WHERE lower(email) = ?").bind(email).first();
-      if (!row && email === "hengly9723@gmail.com") {
-        const id = "4ff01caf-621f-47e4-b19a-742afdad4f9d";
-        await db
-          .prepare(
-            `INSERT OR IGNORE INTO users (id, email, password_hash, full_name, role, status, is_active, is_staff, is_superuser, is_email_verified, created_at, updated_at)
-             VALUES (?, ?, 'pbkdf2_sha256$admin', 'Ly Sokheng', 'admin', 'active', 1, 1, 1, 1, ?, ?)`
-          )
-          .bind(id, email, now, now)
-          .run();
-        row = await db.prepare("SELECT * FROM users WHERE lower(email) = ?").bind(email).first();
-      }
+      const row = await db.prepare("SELECT * FROM users WHERE lower(email) = ?").bind(email).first();
       if (row) {
         await db
           .prepare("UPDATE users SET password_reset_token = ?, password_reset_expires = ?, updated_at = ? WHERE id = ?")
@@ -1673,13 +1627,7 @@ export default {
         }
       }
       if (!targetUser) {
-        const adminRow = await db
-          .prepare("SELECT * FROM users WHERE lower(email) = 'hengly9723@gmail.com'")
-          .first();
-        targetUser = formatUserRow(adminRow) || {
-          id: "4ff01caf-621f-47e4-b19a-742afdad4f9d",
-          email: "hengly9723@gmail.com",
-        };
+        return jsonResponse({ error: "Invalid or expired refresh token." }, 401);
       }
       return jsonResponse(makeTokens(targetUser));
     }
@@ -3108,7 +3056,7 @@ export default {
     }
 
     // --- WISHLIST ---
-    async function getOrCreateWishlist(db, user, sessionId) {
+    async function getOrCreateWishlist(db, user, sessionId, createIfMissing = true) {
       let wl = null;
       if (user) {
         wl = await db
@@ -3122,7 +3070,7 @@ export default {
           .bind(sessionId)
           .first();
       }
-      if (!wl) {
+      if (!wl && createIfMissing) {
         const wid = crypto.randomUUID();
         const now = new Date().toISOString();
         await db
@@ -3135,6 +3083,14 @@ export default {
     }
 
     async function buildWishlistResponse(db, wl) {
+      if (!wl) {
+        return {
+          id: null,
+          user: user ? user.id : null,
+          total_items: 0,
+          items: [],
+        };
+      }
       const [{ results: rows }, catalog] = await Promise.all([
         db
           .prepare("SELECT * FROM wishlist_items WHERE wishlist_id = ? ORDER BY created_at DESC")
@@ -3171,7 +3127,7 @@ export default {
     }
 
     if (apiPath === "wishlist" && method === "GET") {
-      const wl = await getOrCreateWishlist(db, user, sid);
+      const wl = await getOrCreateWishlist(db, user, sid, false);
       return jsonResponse(await buildWishlistResponse(db, wl));
     }
 
