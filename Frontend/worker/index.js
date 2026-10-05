@@ -583,37 +583,42 @@ function generateKhqrPayload(orderNumber, amount, currency = "USD") {
 let bakongToken =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiYTY5Zjg2M2M2NDc3NDUwMSJ9LCJpYXQiOjE3ODc0MTc2NzcsImV4cCI6MTc5NTE5MzY3N30.UR9za6IwFsygrM2qtmb6uQWU1YvkQ1BX6kQUfOPN1rQ";
 
-async function checkBakongMd5(md5Hash) {
-  const baseUrl = "https://api-bakong.nbc.gov.kh";
+async function checkBakongMd5(md5Hash, env) {
+  const activeToken = (env?.BAKONG_TOKEN || bakongToken || "").trim();
+  const isRelay = activeToken.startsWith("rbk");
+  const baseUrl = (
+    env?.BAKONG_BASE_URL ||
+    (isRelay ? "https://api.khqr.dev" : "https://api-bakong.nbc.gov.kh")
+  ).replace(/\/+$/, "");
+  const apiPrefix = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
   const reqHeaders = {
     "Content-Type": "application/json",
     Accept: "application/json, text/plain, */*",
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    Authorization: `Bearer ${bakongToken}`,
+    "User-Agent": "bakong-khqr/0.6.5 (+https://github.com/bsthen/bakong-khqr)",
+    Authorization: `Bearer ${activeToken}`,
   };
   try {
-    let resp = await fetch(`${baseUrl}/v1/check_transaction_by_md5`, {
+    let resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
       method: "POST",
       headers: reqHeaders,
       body: JSON.stringify({ md5: md5Hash }),
     });
     let rawText = await resp.text();
     let data = safeJsonParse(rawText, {});
-    if (resp.status === 401 || data?.errorCode === 6) {
-      const renewResp = await fetch(`${baseUrl}/v1/renew_token`, {
+    if (!isRelay && (resp.status === 401 || data?.errorCode === 6)) {
+      const renewResp = await fetch(`${apiPrefix}/renew_token`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "User-Agent": reqHeaders["User-Agent"],
         },
-        body: JSON.stringify({ email: "hengly9723@gmail.com" }),
+        body: JSON.stringify({ email: env?.BAKONG_EMAIL || "hengly9723@gmail.com" }),
       });
       const renewData = await renewResp.json().catch(() => ({}));
       if (renewData?.data?.token) {
         bakongToken = renewData.data.token;
         reqHeaders.Authorization = `Bearer ${bakongToken}`;
-        resp = await fetch(`${baseUrl}/v1/check_transaction_by_md5`, {
+        resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
           method: "POST",
           headers: reqHeaders,
           body: JSON.stringify({ md5: md5Hash }),
@@ -622,7 +627,16 @@ async function checkBakongMd5(md5Hash) {
         data = safeJsonParse(rawText, {});
       }
     }
-    const paid = data?.responseCode === 0 && Boolean(data?.data);
+    const statusStr = String(
+      data?.data?.status || data?.status || ""
+    ).toUpperCase();
+    const paid =
+      statusStr === "PAID" ||
+      (data?.responseCode === 0 &&
+        Boolean(data?.data) &&
+        statusStr !== "UNPAID" &&
+        statusStr !== "SCANNED" &&
+        statusStr !== "EXPIRED");
     return {
       paid,
       http_status: resp.status,
@@ -3561,16 +3575,34 @@ export default {
       const amount = body.amount ?? ord.total;
       const currency = body.currency || ord.currency || "USD";
       const gen = generateKhqrPayload(ord.order_number, amount, currency);
-      const paymentId = crypto.randomUUID();
       const now = new Date().toISOString();
+      const gwResp = JSON.stringify({ qr: gen.qr, deep_link: null });
 
-      await db
+      const existingPending = await db
         .prepare(
-          `INSERT INTO payments (id, order_id, gateway, transaction_id, amount, currency, status, created_at, updated_at)
-           VALUES (?, ?, 'bakong_khqr', ?, ?, ?, 'pending', ?, ?)`
+          "SELECT id FROM payments WHERE order_id = ? AND gateway = 'bakong_khqr' AND status = 'pending' LIMIT 1"
         )
-        .bind(paymentId, ord.id, gen.md5, String(amount), currency, now, now)
-        .run();
+        .bind(ord.id)
+        .first();
+
+      let paymentId = existingPending?.id;
+      if (paymentId) {
+        await db
+          .prepare(
+            "UPDATE payments SET transaction_id = ?, amount = ?, currency = ?, gateway_response = ?, updated_at = ? WHERE id = ?"
+          )
+          .bind(gen.md5, String(amount), currency, gwResp, now, paymentId)
+          .run();
+      } else {
+        paymentId = crypto.randomUUID();
+        await db
+          .prepare(
+            `INSERT INTO payments (id, order_id, gateway, transaction_id, amount, currency, status, gateway_response, created_at, updated_at)
+             VALUES (?, ?, 'bakong_khqr', ?, ?, ?, 'pending', ?, ?, ?)`
+          )
+          .bind(paymentId, ord.id, gen.md5, String(amount), currency, gwResp, now, now)
+          .run();
+      }
 
       const [freshOrd] = await getOrdersHydrated(db, { orderIdOrNumber: ord.id });
       return jsonResponse({
@@ -3603,7 +3635,7 @@ export default {
       const res =
         confirmPaid || (alreadyPaid && !forceDebug)
           ? { paid: true, http_status: 200 }
-          : await checkBakongMd5(md5Hash);
+          : await checkBakongMd5(md5Hash, env);
       const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
       const now = new Date().toISOString();
       if (isPaid && payRow && !alreadyPaid) {
@@ -3645,7 +3677,9 @@ export default {
       }
       const alreadyPaid = ord?.payment_status === "paid";
       const res =
-        alreadyPaid || confirmPaid ? { paid: true, http_status: 200 } : await checkBakongMd5(md5Hash);
+        alreadyPaid || confirmPaid
+          ? { paid: true, http_status: 200 }
+          : await checkBakongMd5(md5Hash, env);
       const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
       if (isPaid && ord && !alreadyPaid) {
         const now = new Date().toISOString();
