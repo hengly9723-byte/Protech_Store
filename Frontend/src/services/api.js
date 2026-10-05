@@ -1,7 +1,7 @@
 import axios from "axios";
 
-// Base API URL pointing to the Django REST Framework backend
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000/api";
+// Base API URL pointing to the Cloudflare Worker D1 backend
+const API_BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
 // In-memory token store to avoid storing raw JWT access tokens in localStorage (mitigating XSS)
 let inMemoryAccessToken = null;

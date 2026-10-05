@@ -35,10 +35,7 @@ const ProductCard = ({
     product.images?.[0]?.image_url ||
     product.thumbnail_url ||
     "https://i.pinimg.com/736x/b1/81/86/b181860d02096d8c06fd949bb76bd79c.jpg";
-  const primaryImage =
-    rawImage && rawImage.startsWith("/media")
-      ? `http://127.0.0.1:8000${rawImage}`
-      : rawImage;
+  const primaryImage = rawImage;
 
   // Calculate promotional pricing using shared helper across Hero & Catalog
   const pricing = calculateProductPrice(

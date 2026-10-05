@@ -210,10 +210,7 @@ export const PromotionHero = ({
   }
 
   const rawBanner = currentPromo.bannerImageUrl || currentPromo.banner_image_url;
-  const bannerImg =
-    rawBanner && rawBanner.startsWith("/media")
-      ? `http://127.0.0.1:8000${rawBanner}`
-      : rawBanner;
+  const bannerImg = rawBanner || "";
 
   const promoTypeKey = String(currentPromo.type || "").toLowerCase();
   const badgeInfo = CAMPAIGN_BADGES[promoTypeKey] || CAMPAIGN_BADGES.seasonal;

@@ -14,9 +14,6 @@ const toLocalInput = (iso) => (iso ? iso.slice(0, 16) : "");
 
 const resolveBannerUrl = (url) => {
   if (!url) return "";
-  if (url.startsWith("/media")) {
-    return `http://127.0.0.1:8000${url}`;
-  }
   return url;
 };
 

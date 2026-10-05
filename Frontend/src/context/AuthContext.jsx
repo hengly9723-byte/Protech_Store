@@ -44,10 +44,10 @@ export const AuthProvider = ({ children }) => {
 
     const initAuth = async () => {
       const storedRefresh = localStorage.getItem("protech_refresh_token");
-      if (storedRefresh) {
+      if (storedRefresh && storedRefresh !== "undefined" && storedRefresh !== "null") {
         try {
           const res = await refreshTokenApi(storedRefresh);
-          const newAccess = res.data.access;
+          const newAccess = res.data.access || res.data.access_token;
           setAccessToken(newAccess);
 
           // Fetch fresh user profile
@@ -57,6 +57,8 @@ export const AuthProvider = ({ children }) => {
           console.warn("Session restore failed, logging out:", err);
           logout();
         }
+      } else if (storedRefresh) {
+        localStorage.removeItem("protech_refresh_token");
       }
       setIsLoading(false);
     };
@@ -150,7 +152,8 @@ export const AuthProvider = ({ children }) => {
     setAuthError(null);
     try {
       const res = await googleLoginApi(idToken);
-      const { access_token, refresh_token } = res.data;
+      const access_token = res.data.access_token || res.data.access || res.data.tokens?.access;
+      const refresh_token = res.data.refresh_token || res.data.refresh || res.data.tokens?.refresh;
 
       setAccessToken(access_token);
       localStorage.setItem("protech_refresh_token", refresh_token);
@@ -206,7 +209,11 @@ export const AuthProvider = ({ children }) => {
   const requestPasswordReset = async (email) => {
     try {
       const res = await requestPasswordResetApi(email);
-      return { success: true, message: res.data.message };
+      return {
+        success: true,
+        message: res.data.message,
+        reset_token: res.data.reset_token || null,
+      };
     } catch (err) {
       return { success: false, error: err.response?.data?.error || "Failed to request password reset." };
     }
