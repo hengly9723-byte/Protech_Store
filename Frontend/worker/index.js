@@ -761,6 +761,43 @@ const safeJsonParse = (str, fallback = {}) => {
   }
 };
 
+async function logAudit(
+  db,
+  request,
+  user,
+  { id, action, entity_type, entity_id, old_values, new_values, created_at }
+) {
+  try {
+    const logId = id || crypto.randomUUID();
+    const ip =
+      request?.headers?.get("CF-Connecting-IP") ||
+      request?.headers?.get("X-Forwarded-For") ||
+      null;
+    const ua = request?.headers?.get("User-Agent") || null;
+    const now = created_at || new Date().toISOString();
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO audit_logs (
+          id, user_id, action, entity_type, entity_id,
+          old_values, new_values, ip_address, user_agent, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        logId,
+        user?.id || null,
+        String(action || "update"),
+        String(entity_type || "system"),
+        entity_id ? String(entity_id) : null,
+        old_values ? JSON.stringify(old_values) : null,
+        new_values ? JSON.stringify(new_values) : null,
+        ip,
+        ua,
+        now
+      )
+      .run();
+  } catch (_) {}
+}
+
 // ==========================================
 // D1 Query & Serialization Helpers
 // ==========================================
@@ -1858,6 +1895,15 @@ export default {
         )
         .run();
 
+      await logAudit(db, request, user, {
+        id: `audit-prod-${pid}`,
+        action: "create",
+        entity_type: "product",
+        entity_id: pid,
+        new_values: { name: body.name || "", slug, status: body.status || "active" },
+        created_at: now,
+      });
+
       const catalog = await getAllProductsHydrated(db);
       return jsonResponse(catalog.productDetailsMap.get(pid), 201);
     }
@@ -1971,17 +2017,35 @@ export default {
           )
           .run();
 
+        await logAudit(db, request, user, {
+          action: "update",
+          entity_type: "product",
+          entity_id: existing.id,
+          old_values: { name: existing.name, status: existing.status },
+          new_values: {
+            name: body.name ?? existing.name,
+            status: body.status ?? existing.status,
+          },
+          created_at: now,
+        });
+
         const catalog = await getAllProductsHydrated(db);
         return jsonResponse(catalog.productDetailsMap.get(existing.id));
       }
       if (method === "DELETE") {
         const existing = await db
-          .prepare("SELECT id FROM products WHERE id = ? OR slug = ?")
+          .prepare("SELECT id, name FROM products WHERE id = ? OR slug = ?")
           .bind(idOrSlug, idOrSlug)
           .first();
         if (existing) {
           // Foreign keys ON DELETE CASCADE automatically deletes variants, images, stock, cart_items, wishlist_items
           await db.prepare("DELETE FROM products WHERE id = ?").bind(existing.id).run();
+          await logAudit(db, request, user, {
+            action: "delete",
+            entity_type: "product",
+            entity_id: existing.id,
+            old_values: { name: existing.name },
+          });
         }
         return jsonResponse({ deleted: true });
       }
@@ -2054,6 +2118,15 @@ export default {
           )
           .bind(price, compareAt, sku, now, pid),
       ]);
+
+      await logAudit(db, request, user, {
+        id: `audit-var-${vid}`,
+        action: "create",
+        entity_type: "product",
+        entity_id: vid,
+        new_values: { sku, name: body.name || prodRow.name, price },
+        created_at: now,
+      });
 
       const catalog = await getAllProductsHydrated(db);
       const created = catalog.variants.find((v) => String(v.id) === vid);
@@ -2229,11 +2302,30 @@ export default {
           )
           .run();
 
+        await logAudit(db, request, user, {
+          action: "update",
+          entity_type: "product",
+          entity_id: vid,
+          old_values: { sku: existing.sku, price: existing.price },
+          new_values: { sku: body.sku ?? existing.sku, price: nextPrice },
+          created_at: now,
+        });
+
         const catalog = await getAllProductsHydrated(db);
         return jsonResponse(catalog.variants.find((x) => String(x.id) === vid) || {});
       }
       if (method === "DELETE") {
+        const existing = await db
+          .prepare("SELECT sku, name FROM product_variants WHERE id = ?")
+          .bind(vid)
+          .first();
         await db.prepare("DELETE FROM product_variants WHERE id = ?").bind(vid).run();
+        await logAudit(db, request, user, {
+          action: "delete",
+          entity_type: "product",
+          entity_id: vid,
+          old_values: existing ? { sku: existing.sku, name: existing.name } : null,
+        });
         return jsonResponse({ deleted: true });
       }
     }
@@ -3054,7 +3146,10 @@ export default {
       const txType = body.type || "adjustment";
       const now = new Date().toISOString();
 
-      let s = await db.prepare("SELECT * FROM stock WHERE variant_id = ?").bind(vid).first();
+      let [s, varRow] = await Promise.all([
+        db.prepare("SELECT * FROM stock WHERE variant_id = ?").bind(vid).first(),
+        db.prepare("SELECT sku, name FROM product_variants WHERE id = ?").bind(vid).first(),
+      ]);
       if (!s) {
         const sidNew = crypto.randomUUID();
         await db
@@ -3066,14 +3161,19 @@ export default {
         s = await db.prepare("SELECT * FROM stock WHERE variant_id = ?").bind(vid).first();
       }
 
-      let newAvail = Number(s.quantity_available || 0);
-      let newDamaged = Number(s.quantity_damaged || 0);
+      const oldAvail = Number(s.quantity_available || 0);
+      const oldDamaged = Number(s.quantity_damaged || 0);
+      let newAvail = oldAvail;
+      let newDamaged = oldDamaged;
       if (txType === "damaged") {
         newDamaged += Math.abs(delta);
         newAvail = Math.max(0, newAvail - Math.abs(delta));
       } else {
         newAvail = Math.max(0, newAvail + delta);
       }
+
+      const txId = crypto.randomUUID();
+      const effectiveDelta = txType === "damaged" ? -Math.abs(delta) : delta;
 
       await db.batch([
         db
@@ -3087,16 +3187,37 @@ export default {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .bind(
-            crypto.randomUUID(),
+            txId,
             vid,
             txType,
-            txType === "damaged" ? -Math.abs(delta) : delta,
+            effectiveDelta,
             body.note || "",
             user?.id || null,
             user?.email || "admin",
             now
           ),
       ]);
+
+      await logAudit(db, request, user, {
+        id: `audit-tx-${txId}`,
+        action: "update",
+        entity_type: "stock",
+        entity_id: vid,
+        old_values: {
+          sku: varRow?.sku || vid,
+          quantity_available: oldAvail,
+          quantity_damaged: oldDamaged,
+        },
+        new_values: {
+          sku: varRow?.sku || vid,
+          type: txType,
+          quantity_delta: effectiveDelta,
+          quantity_available: newAvail,
+          quantity_damaged: newDamaged,
+          note: body.note || "",
+        },
+        created_at: now,
+      });
 
       return jsonResponse({
         variant: vid,
@@ -3465,6 +3586,20 @@ export default {
       stmts.push(db.prepare("DELETE FROM cart_items WHERE cart_id = ?").bind(cartData.id));
       await db.batch(stmts);
 
+      await logAudit(db, request, user, {
+        id: `audit-ord-${orderId}`,
+        action: "create",
+        entity_type: "order",
+        entity_id: orderId,
+        new_values: {
+          order_number: orderNum,
+          status: "pending",
+          payment_status: "unpaid",
+          total: total.toFixed(2),
+        },
+        created_at: now,
+      });
+
       const [order] = await getOrdersHydrated(db, { orderIdOrNumber: orderId });
       return jsonResponse({ message: "Order created successfully!", order }, 201);
     }
@@ -3482,6 +3617,7 @@ export default {
       const oid = orderStatusMatch[1];
       const existing = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(oid).first();
       if (!existing) return jsonResponse({ error: "Order not found." }, 404);
+      const now = new Date().toISOString();
       await db
         .prepare(
           `UPDATE orders SET status = ?, fulfillment_status = ?, payment_status = ?, updated_at = ? WHERE id = ?`
@@ -3490,10 +3626,26 @@ export default {
           body.status ?? existing.status,
           body.fulfillment_status ?? existing.fulfillment_status,
           body.payment_status ?? existing.payment_status,
-          new Date().toISOString(),
+          now,
           oid
         )
         .run();
+      await logAudit(db, request, user, {
+        action: "update",
+        entity_type: "order",
+        entity_id: oid,
+        old_values: {
+          status: existing.status,
+          fulfillment_status: existing.fulfillment_status,
+          payment_status: existing.payment_status,
+        },
+        new_values: {
+          status: body.status ?? existing.status,
+          fulfillment_status: body.fulfillment_status ?? existing.fulfillment_status,
+          payment_status: body.payment_status ?? existing.payment_status,
+        },
+        created_at: now,
+      });
       const [ord] = await getOrdersHydrated(db, { orderIdOrNumber: oid });
       return jsonResponse({ message: "Order status updated.", order: ord });
     }
@@ -3525,6 +3677,19 @@ export default {
           )
           .bind(now, oid),
       ]);
+      await logAudit(db, request, user, {
+        id: `audit-ship-${shipId}`,
+        action: "create",
+        entity_type: "shipment",
+        entity_id: shipId,
+        new_values: {
+          order_id: oid,
+          carrier: body.carrier || "Standard Courier",
+          tracking_number: body.tracking_number || "",
+          status: body.status || "shipped",
+        },
+        created_at: now,
+      });
       const [ord] = await getOrdersHydrated(db, { orderIdOrNumber: oid });
       return jsonResponse({ message: "Shipment created.", order: ord });
     }
@@ -3554,6 +3719,18 @@ export default {
           .prepare("UPDATE orders SET payment_status = 'refunded', updated_at = ? WHERE id = ?")
           .bind(now, oid),
       ]);
+      await logAudit(db, request, user, {
+        action: "update",
+        entity_type: "order",
+        entity_id: oid,
+        old_values: { payment_status: existing.payment_status },
+        new_values: {
+          payment_status: "refunded",
+          refund_amount: String(body.amount || existing.total),
+          reason: body.reason || "",
+        },
+        created_at: now,
+      });
       const [ord] = await getOrdersHydrated(db, { orderIdOrNumber: oid });
       return jsonResponse({ message: "Refund processed.", order: ord });
     }
@@ -3718,6 +3895,7 @@ export default {
       const uid = userMatch[1];
       const existing = await db.prepare("SELECT * FROM users WHERE id = ?").bind(uid).first();
       if (!existing) return jsonResponse({ error: "User not found." }, 404);
+      const now = new Date().toISOString();
       await db
         .prepare(
           `UPDATE users SET
@@ -3731,10 +3909,21 @@ export default {
           body.is_active !== undefined ? (body.is_active ? 1 : 0) : existing.is_active,
           body.is_staff !== undefined ? (body.is_staff ? 1 : 0) : existing.is_staff,
           body.is_superuser !== undefined ? (body.is_superuser ? 1 : 0) : existing.is_superuser,
-          new Date().toISOString(),
+          now,
           uid
         )
         .run();
+      await logAudit(db, request, user, {
+        action: "update",
+        entity_type: "user",
+        entity_id: uid,
+        old_values: { role: existing.role, status: existing.status },
+        new_values: {
+          role: body.role ?? existing.role,
+          status: body.status ?? existing.status,
+        },
+        created_at: now,
+      });
       const updated = await db.prepare("SELECT * FROM users WHERE id = ?").bind(uid).first();
       return jsonResponse(formatUserRow(updated));
     }
@@ -3771,24 +3960,173 @@ export default {
           .prepare("UPDATE reviews SET status = ?, updated_at = ? WHERE id = ?")
           .bind(body.status || "approved", new Date().toISOString(), rid)
           .run();
+        await logAudit(db, request, user, {
+          action: "update",
+          entity_type: "review",
+          entity_id: rid,
+          new_values: { status: body.status || "approved" },
+        });
         const row = await db.prepare("SELECT * FROM reviews WHERE id = ?").bind(rid).first();
         return jsonResponse(row || {});
       }
       if (method === "DELETE") {
         await db.prepare("DELETE FROM reviews WHERE id = ?").bind(rid).run();
+        await logAudit(db, request, user, {
+          action: "delete",
+          entity_type: "review",
+          entity_id: rid,
+        });
         return jsonResponse({ deleted: true });
       }
     }
 
     if (apiPath === "audit-logs" && method === "GET") {
+      // Automatically backfill any unlogged stock_transactions, products, and orders so historical restocks/events appear
+      try {
+        const [{ results: txRows }, { results: prodRows }, { results: ordRows }] =
+          await Promise.all([
+            db
+              .prepare(
+                `SELECT t.*, v.sku as variant_sku, v.name as variant_name
+                 FROM stock_transactions t
+                 LEFT JOIN product_variants v ON v.id = t.variant_id
+                 ORDER BY t.created_at DESC LIMIT 100`
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, name, slug, status, created_at FROM products ORDER BY created_at DESC LIMIT 50"
+              )
+              .all(),
+            db
+              .prepare(
+                "SELECT id, user_id, order_number, status, payment_status, total, created_at FROM orders ORDER BY created_at DESC LIMIT 50"
+              )
+              .all(),
+          ]);
+
+        const backfillStmts = [];
+        for (const t of txRows || []) {
+          backfillStmts.push(
+            db
+              .prepare(
+                `INSERT OR IGNORE INTO audit_logs (
+                  id, user_id, action, entity_type, entity_id,
+                  old_values, new_values, ip_address, user_agent, created_at
+                ) VALUES (?, ?, 'update', 'stock', ?, NULL, ?, NULL, NULL, ?)`
+              )
+              .bind(
+                `audit-tx-${t.id}`,
+                t.created_by || user?.id || null,
+                t.variant_id,
+                JSON.stringify({
+                  sku: t.variant_sku || t.variant_id,
+                  variant_name: t.variant_name || "",
+                  type: t.type,
+                  quantity_delta: Number(t.quantity),
+                  note: t.note || "",
+                  created_by_email: t.created_by_email || "admin",
+                }),
+                t.created_at
+              )
+          );
+        }
+        for (const p of prodRows || []) {
+          backfillStmts.push(
+            db
+              .prepare(
+                `INSERT OR IGNORE INTO audit_logs (
+                  id, user_id, action, entity_type, entity_id,
+                  old_values, new_values, ip_address, user_agent, created_at
+                ) VALUES (?, ?, 'create', 'product', ?, NULL, ?, NULL, NULL, ?)`
+              )
+              .bind(
+                `audit-prod-${p.id}`,
+                user?.id || null,
+                p.id,
+                JSON.stringify({
+                  name: p.name,
+                  slug: p.slug,
+                  status: p.status,
+                }),
+                p.created_at
+              )
+          );
+        }
+        for (const o of ordRows || []) {
+          backfillStmts.push(
+            db
+              .prepare(
+                `INSERT OR IGNORE INTO audit_logs (
+                  id, user_id, action, entity_type, entity_id,
+                  old_values, new_values, ip_address, user_agent, created_at
+                ) VALUES (?, ?, 'create', 'order', ?, NULL, ?, NULL, NULL, ?)`
+              )
+              .bind(
+                `audit-ord-${o.id}`,
+                o.user_id || null,
+                o.id,
+                JSON.stringify({
+                  order_number: o.order_number,
+                  status: o.status,
+                  payment_status: o.payment_status,
+                  total: o.total,
+                }),
+                o.created_at
+              )
+          );
+        }
+        if (backfillStmts.length > 0) {
+          await db.batch(backfillStmts);
+        }
+      } catch (_) {}
+
+      const entityTypeFilter = url.searchParams.get("entity_type");
+      const actionFilter = url.searchParams.get("action");
+
       const { results } = await db
-        .prepare("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100")
+        .prepare(
+          `SELECT a.*, u.email as user_email
+           FROM audit_logs a
+           LEFT JOIN users u ON u.id = a.user_id
+           ORDER BY a.created_at DESC
+           LIMIT 200`
+        )
         .all();
+
+      let list = (results || []).map((a) => {
+        const parsedOld = safeJsonParse(a.old_values, null);
+        const parsedNew = safeJsonParse(a.new_values, null);
+        return {
+          id: a.id,
+          user: a.user_id,
+          user_email:
+            a.user_email ||
+            parsedNew?.created_by_email ||
+            user?.email ||
+            "Admin",
+          action: a.action,
+          entity_type: a.entity_type,
+          entity_id: a.entity_id,
+          old_values: parsedOld,
+          new_values: parsedNew,
+          ip_address: a.ip_address || null,
+          created_at: a.created_at,
+        };
+      });
+
+      if (entityTypeFilter) {
+        list = list.filter((l) => l.entity_type === entityTypeFilter);
+      }
+      if (actionFilter) {
+        list = list.filter((l) => l.action === actionFilter);
+      }
+
       return jsonResponse({
-        count: (results || []).length,
+        count: list.length,
         next: null,
         previous: null,
-        results: results || [],
+        results: list,
       });
     }
 
