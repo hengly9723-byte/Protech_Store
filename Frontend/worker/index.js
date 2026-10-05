@@ -5,19 +5,292 @@ const STATE_CACHE_URL = "https://protech-internal-state.local/state-v1";
 // Deep clone helper
 const clone = (obj) => JSON.parse(JSON.stringify(obj));
 
-// In-memory state (backed by Cloudflare Cache API for cross-request persistence)
+// In-memory fallback state (backed by Cloudflare Cache API for cross-request persistence)
 let state = null;
 
+function syncCatalogState(st) {
+  if (!st || typeof st !== "object") return st;
+  st.products = Array.isArray(st.products) ? st.products : [];
+  st.product_details =
+    st.product_details && typeof st.product_details === "object"
+      ? st.product_details
+      : {};
+  st.variants = Array.isArray(st.variants) ? st.variants : [];
+  st.variant_details =
+    st.variant_details && typeof st.variant_details === "object"
+      ? st.variant_details
+      : {};
+  st.stock = Array.isArray(st.stock) ? st.stock : [];
+  st.stock_transactions = Array.isArray(st.stock_transactions)
+    ? st.stock_transactions
+    : [];
+  st.brands = Array.isArray(st.brands) ? st.brands : [];
+  st.categories_flat = Array.isArray(st.categories_flat) ? st.categories_flat : [];
+  st.product_types = Array.isArray(st.product_types) ? st.product_types : [];
+
+  const validProductIds = new Set(st.products.map((p) => String(p.id)));
+
+  // 1. Remove any orphaned product_details whose product was deleted from st.products
+  for (const key of Object.keys(st.product_details)) {
+    const rec = st.product_details[key];
+    if (!rec || !validProductIds.has(String(rec.id))) {
+      delete st.product_details[key];
+    }
+  }
+
+  // 2. Ensure every product in st.products has a synced product_details object
+  for (const pList of st.products) {
+    const pid = String(pList.id);
+    let pDetail = st.product_details[pid] || st.product_details[pList.slug];
+    if (!pDetail) {
+      pDetail = {
+        ...pList,
+        description: pList.description || "",
+        cost_price: String(pList.cost_price || "0.00"),
+        warranty_months: Number(pList.warranty_months || 12),
+        weight: String(pList.weight || "1.000"),
+        variants: [],
+        images: pList.primary_image ? [pList.primary_image] : [],
+        specifications: [],
+      };
+    }
+
+    const brandId =
+      pList.brand_id ||
+      (typeof pList.brand === "object" ? pList.brand?.id : pList.brand) ||
+      pDetail.brand_id ||
+      (typeof pDetail.brand === "object" ? pDetail.brand?.id : pDetail.brand) ||
+      null;
+    const brandObj =
+      st.brands.find((b) => String(b.id) === String(brandId)) ||
+      (typeof pDetail.brand === "object" ? pDetail.brand : null);
+
+    const catId =
+      pList.category_id ||
+      (typeof pList.category === "object" ? pList.category?.id : pList.category) ||
+      pDetail.category_id ||
+      (typeof pDetail.category === "object" ? pDetail.category?.id : pDetail.category) ||
+      null;
+    const catObj =
+      st.categories_flat.find((c) => String(c.id) === String(catId)) ||
+      (typeof pDetail.category === "object" ? pDetail.category : null);
+
+    const typeId =
+      pList.type_id ||
+      (typeof pList.type === "object" ? pList.type?.id : pList.type) ||
+      pDetail.type_id ||
+      (typeof pDetail.type === "object" ? pDetail.type?.id : pDetail.type) ||
+      null;
+    const typeObj =
+      st.product_types.find((t) => String(t.id) === String(typeId)) ||
+      (typeof pDetail.type === "object" ? pDetail.type : st.product_types[0] || null);
+
+    pList.brand = brandObj?.id || brandId || null;
+    pList.brand_name = brandObj?.name || pList.brand_name || "";
+    pList.category = catObj?.id || catId || null;
+    pList.category_name = catObj?.name || pList.category_name || "";
+    pList.type = typeObj?.id || typeId || null;
+    pList.type_name = typeObj?.name || pList.type_name || "Physical";
+
+    pDetail.id = pList.id;
+    pDetail.name = pList.name;
+    pDetail.slug = pList.slug;
+    pDetail.short_description = pList.short_description ?? pDetail.short_description ?? "";
+    pDetail.currency = pList.currency || pDetail.currency || "USD";
+    pDetail.status = pList.status || pDetail.status || "active";
+    pDetail.is_featured = Boolean(pList.is_featured);
+    pDetail.is_active = pList.is_active !== false;
+    pDetail.brand = brandObj;
+    pDetail.brand_name = pList.brand_name;
+    pDetail.category = catObj;
+    pDetail.category_name = pList.category_name;
+    pDetail.type = typeObj;
+    pDetail.type_name = pList.type_name;
+
+    st.product_details[pid] = pDetail;
+    if (pList.slug) st.product_details[pList.slug] = pDetail;
+  }
+
+  // 3. Filter variants to ONLY those belonging to a valid existing product
+  st.variants = st.variants.filter((v) => {
+    const pid = String(v.product_id || v.product || "");
+    return validProductIds.has(pid);
+  });
+
+  const validVariantIds = new Set(st.variants.map((v) => String(v.id)));
+
+  // 4. Clean up orphaned variant_details
+  for (const vid of Object.keys(st.variant_details)) {
+    if (!validVariantIds.has(String(vid))) {
+      delete st.variant_details[vid];
+    }
+  }
+
+  // 5. Filter stock to ONLY variants that still exist
+  st.stock = st.stock.filter((s) => validVariantIds.has(String(s.variant)));
+
+  // 6. Sync each variant with its parent product and stock record
+  for (const v of st.variants) {
+    const vid = String(v.id);
+    const pid = String(v.product_id || v.product);
+    v.product = pid;
+    v.product_id = pid;
+
+    const pList = st.products.find((p) => String(p.id) === pid);
+    const pDetail = st.product_details[pid] || pList;
+
+    v.product_name = pList?.name || v.product_name || v.name || "";
+    v.product_slug = pList?.slug || v.product_slug || "";
+    v.brand = pDetail?.brand || v.brand || null;
+    v.brand_id = pDetail?.brand?.id || pList?.brand || v.brand_id || null;
+    v.brand_name = pDetail?.brand?.name || pList?.brand_name || v.brand_name || "";
+    v.category = pDetail?.category || v.category || null;
+    v.category_id = pDetail?.category?.id || pList?.category || v.category_id || null;
+    v.category_name =
+      pDetail?.category?.name || pList?.category_name || v.category_name || "";
+    v.type_name = pDetail?.type?.name || pList?.type_name || v.type_name || "Physical";
+    v.is_featured = Boolean(pList?.is_featured);
+    v.price = String(v.price || pList?.base_price || "0.00");
+    v.compare_at_price = String(v.compare_at_price || v.price || "0.00");
+    v.effective_compare_at_price = Number(v.compare_at_price || v.price || 0);
+
+    const allProdImgs = Array.isArray(pDetail?.images) ? pDetail.images : [];
+    const varImgs = allProdImgs.filter((img) => String(img.variant) === vid);
+    if (varImgs.length > 0) {
+      v.images = varImgs;
+    } else if (allProdImgs.length > 0) {
+      v.images = allProdImgs;
+    } else {
+      v.images = Array.isArray(v.images) ? v.images : [];
+    }
+    const primImg =
+      varImgs.find((i) => i.is_primary) ||
+      varImgs[0] ||
+      allProdImgs.find((i) => i.is_primary) ||
+      allProdImgs[0] ||
+      v.primary_image ||
+      pList?.primary_image ||
+      null;
+    v.primary_image = primImg;
+
+    // Ensure stock record exists and is synced
+    let stockRec = st.stock.find((s) => String(s.variant) === vid);
+    if (!stockRec) {
+      stockRec = {
+        id: crypto.randomUUID(),
+        variant: vid,
+        variant_sku: v.sku || "",
+        variant_name: v.name || v.product_name || "",
+        product_name: v.product_name || v.name || "",
+        quantity_available: Number(v.stock_quantity ?? 25),
+        quantity_reserved: 0,
+        quantity_damaged: 0,
+        reorder_level: 5,
+        is_low_stock: false,
+        in_stock: true,
+        updated_at: new Date().toISOString(),
+      };
+      st.stock.push(stockRec);
+    } else {
+      stockRec.variant_sku = v.sku || stockRec.variant_sku || "";
+      stockRec.variant_name = v.name || v.product_name || stockRec.variant_name || "";
+      stockRec.product_name = v.product_name || v.name || stockRec.product_name || "";
+      stockRec.in_stock = Number(stockRec.quantity_available) > 0;
+      stockRec.is_low_stock =
+        Number(stockRec.quantity_available) <= Number(stockRec.reorder_level || 5);
+    }
+
+    v.stock_quantity = Number(stockRec.quantity_available);
+    v.in_stock = Number(stockRec.quantity_available) > 0;
+
+    st.variant_details[vid] = {
+      ...(st.variant_details[vid] || {}),
+      ...v,
+    };
+  }
+
+  // 7. Sync each product's variants list, variants_count, base_price, sku, and primary_image
+  for (const pList of st.products) {
+    const pid = String(pList.id);
+    const pDetail = st.product_details[pid];
+    const prodVars = st.variants.filter(
+      (v) => String(v.product_id || v.product) === pid
+    );
+    pList.variants_count = prodVars.length;
+    if (pDetail) pDetail.variants = prodVars;
+
+    if (prodVars.length > 0) {
+      pList.base_price = String(prodVars[0].price || pList.base_price || "0.00");
+      pList.compare_at_price = String(
+        prodVars[0].compare_at_price || prodVars[0].price || pList.compare_at_price || "0.00"
+      );
+      pList.sku = prodVars[0].sku || pList.sku || "";
+      if (pDetail) {
+        pDetail.base_price = pList.base_price;
+        pDetail.compare_at_price = pList.compare_at_price;
+        pDetail.sku = pList.sku;
+      }
+    }
+
+    const allImgs = Array.isArray(pDetail?.images) ? pDetail.images : [];
+    if (allImgs.length > 0) {
+      const prim = allImgs.find((i) => i.is_primary) || allImgs[0];
+      pList.primary_image = prim;
+      if (pDetail) pDetail.primary_image = prim;
+    } else if (!pList.primary_image) {
+      pList.primary_image = null;
+      if (pDetail) pDetail.primary_image = null;
+    }
+  }
+
+  // 8. Clean up deleted variants/products from carts, wishlists, and promotions
+  for (const cart of Object.values(st.carts || {})) {
+    if (Array.isArray(cart.items)) {
+      cart.items = cart.items.filter((item) =>
+        validVariantIds.has(String(item.variant))
+      );
+    }
+  }
+  for (const wk of Object.keys(st.wishlists || {})) {
+    if (Array.isArray(st.wishlists[wk])) {
+      st.wishlists[wk] = st.wishlists[wk].filter(
+        (item) =>
+          validProductIds.has(String(item.product)) &&
+          (!item.variant || validVariantIds.has(String(item.variant)))
+      );
+    }
+  }
+  if (Array.isArray(st.promotions)) {
+    for (const promo of st.promotions) {
+      if (Array.isArray(promo.products)) {
+        promo.products = promo.products.filter((p) =>
+          validProductIds.has(String(p.id))
+        );
+        promo.products_count = promo.products.length;
+      }
+      if (Array.isArray(promo.featuredProducts)) {
+        promo.featuredProducts = promo.featuredProducts.filter((p) =>
+          validProductIds.has(String(p.id))
+        );
+      }
+    }
+    st.promotions_active = st.promotions.filter((p) => p.is_active);
+  }
+
+  return st;
+}
+
 async function getState() {
-  if (state) return state;
   try {
     const cache = caches.default;
     const cached = await cache.match(STATE_CACHE_URL);
     if (cached) {
       state = await cached.json();
-      return state;
+      return syncCatalogState(state);
     }
   } catch (_) {}
+
+  if (state) return syncCatalogState(state);
 
   state = {
     products: clone(seedData.products?.results || []),
@@ -42,6 +315,7 @@ async function getState() {
     roles: clone(seedData.roles || []),
     users: clone(seedData.users || []),
     stock: clone(seedData.stock?.results || []),
+    stock_transactions: [],
     carts: {},
     wishlists: {},
     addresses: {},
@@ -50,28 +324,22 @@ async function getState() {
     reviews: {},
     audit_logs: [],
   };
-  return state;
+  return syncCatalogState(state);
 }
 
 async function saveState(ctx) {
   if (!state) return;
-  const putPromise = (async () => {
-    try {
-      const cache = caches.default;
-      const res = new Response(JSON.stringify(state), {
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "public, max-age=31536000",
-        },
-      });
-      await cache.put(STATE_CACHE_URL, res);
-    } catch (_) {}
-  })();
-  if (ctx && ctx.waitUntil) {
-    ctx.waitUntil(putPromise);
-  } else {
-    await putPromise;
-  }
+  syncCatalogState(state);
+  try {
+    const cache = caches.default;
+    const res = new Response(JSON.stringify(state), {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=31536000",
+      },
+    });
+    await cache.put(STATE_CACHE_URL, res);
+  } catch (_) {}
 }
 
 // ==========================================
@@ -678,10 +946,21 @@ export default {
 
     if (apiPath === "products" && method === "POST") {
       const pid = crypto.randomUUID();
-      const brandObj = st.brands.find((b) => String(b.id) === String(body.brand)) || null;
-      const catObj = st.categories_flat.find((c) => String(c.id) === String(body.category)) || null;
-      const typeObj = st.product_types.find((t) => String(t.id) === String(body.type)) || st.product_types[0] || null;
-      const slug = body.slug || (body.name || "product").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const brandId = body.brand_id || body.brand || null;
+      const catId = body.category_id || body.category || null;
+      const typeId = body.type_id || body.type || null;
+      const brandObj = st.brands.find((b) => String(b.id) === String(brandId)) || null;
+      const catObj = st.categories_flat.find((c) => String(c.id) === String(catId)) || null;
+      const typeObj =
+        st.product_types.find((t) => String(t.id) === String(typeId)) ||
+        st.product_types[0] ||
+        null;
+      const slug =
+        body.slug ||
+        (body.name || "product")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
       const listRec = {
         id: pid,
         name: body.name || "",
@@ -694,11 +973,14 @@ export default {
         status: body.status || "active",
         is_featured: Boolean(body.is_featured),
         is_active: body.is_active !== false,
-        brand: brandObj?.id || body.brand || null,
+        brand: brandObj?.id || brandId || null,
+        brand_id: brandObj?.id || brandId || null,
         brand_name: brandObj?.name || "",
-        category: catObj?.id || body.category || null,
+        category: catObj?.id || catId || null,
+        category_id: catObj?.id || catId || null,
         category_name: catObj?.name || "",
-        type: typeObj?.id || body.type || null,
+        type: typeObj?.id || typeId || null,
+        type_id: typeObj?.id || typeId || null,
         type_name: typeObj?.name || "Physical",
         primary_image: null,
         variants_count: 0,
@@ -722,7 +1004,7 @@ export default {
       st.product_details[pid] = detailRec;
       st.product_details[slug] = detailRec;
       await saveState(ctx);
-      return jsonResponse(detailRec, 201);
+      return jsonResponse(st.product_details[pid] || detailRec, 201);
     }
 
     const prodMatch = apiPath.match(/^products\/([^/]+)$/);
@@ -739,19 +1021,59 @@ export default {
       }
       if (method === "PATCH" || method === "PUT") {
         if (!detail) return jsonResponse({ error: "Product not found." }, 404);
-        Object.assign(detail, body);
         const listRec = st.products.find((p) => String(p.id) === String(detail.id));
-        if (listRec) Object.assign(listRec, body);
+        Object.assign(detail, body, { updated_at: new Date().toISOString() });
+        if (listRec) {
+          Object.assign(listRec, body, { updated_at: new Date().toISOString() });
+        }
+        if ("brand_id" in body || "brand" in body) {
+          const bid = body.brand_id ?? body.brand;
+          const bObj = st.brands.find((b) => String(b.id) === String(bid)) || null;
+          detail.brand = bObj;
+          detail.brand_id = bObj?.id || null;
+          if (listRec) {
+            listRec.brand = bObj?.id || null;
+            listRec.brand_id = bObj?.id || null;
+            listRec.brand_name = bObj?.name || "";
+          }
+        }
+        if ("category_id" in body || "category" in body) {
+          const cid = body.category_id ?? body.category;
+          const cObj = st.categories_flat.find((c) => String(c.id) === String(cid)) || null;
+          detail.category = cObj;
+          detail.category_id = cObj?.id || null;
+          if (listRec) {
+            listRec.category = cObj?.id || null;
+            listRec.category_id = cObj?.id || null;
+            listRec.category_name = cObj?.name || "";
+          }
+        }
+        if ("type_id" in body || "type" in body) {
+          const tid = body.type_id ?? body.type;
+          const tObj = st.product_types.find((t) => String(t.id) === String(tid)) || null;
+          detail.type = tObj;
+          detail.type_id = tObj?.id || null;
+          if (listRec) {
+            listRec.type = tObj?.id || null;
+            listRec.type_id = tObj?.id || null;
+            listRec.type_name = tObj?.name || "Physical";
+          }
+        }
         await saveState(ctx);
-        return jsonResponse(detail);
+        return jsonResponse(st.product_details[detail.id] || detail);
       }
       if (method === "DELETE") {
+        const targetId = detail ? String(detail.id) : idOrSlug;
         if (detail) {
           delete st.product_details[detail.id];
           delete st.product_details[detail.slug];
         }
-        st.products = st.products.filter((p) => String(p.id) !== idOrSlug);
-        st.variants = st.variants.filter((v) => String(v.product) !== idOrSlug);
+        st.products = st.products.filter(
+          (p) => String(p.id) !== targetId && String(p.slug) !== idOrSlug
+        );
+        st.variants = st.variants.filter(
+          (v) => String(v.product_id || v.product) !== targetId
+        );
         await saveState(ctx);
         return jsonResponse({ deleted: true });
       }
@@ -765,26 +1087,33 @@ export default {
 
     if (apiPath === "variants" && method === "POST") {
       const vid = crypto.randomUUID();
-      const prodDetail = st.product_details[body.product] || {};
+      const pid = String(body.product || body.product_id || "");
+      const prodDetail = st.product_details[pid] || {};
       const newVar = {
         id: vid,
-        product: body.product,
+        product: pid,
+        product_id: pid,
         product_name: prodDetail.name || body.name || "",
         product_slug: prodDetail.slug || "",
+        brand: prodDetail.brand || null,
         brand_id: prodDetail.brand?.id || null,
         brand_name: prodDetail.brand?.name || "",
+        category: prodDetail.category || null,
         category_id: prodDetail.category?.id || null,
         category_name: prodDetail.category?.name || "",
+        type_name: prodDetail.type?.name || "Physical",
+        is_featured: Boolean(prodDetail.is_featured),
         sku: body.sku || "",
         barcode: body.barcode || "",
         name: body.name || prodDetail.name || "",
         price: String(body.price || prodDetail.base_price || "0.00"),
         cost_price: String(body.cost_price || "0.00"),
         compare_at_price: String(body.compare_at_price || body.price || "0.00"),
+        effective_compare_at_price: Number(body.compare_at_price || body.price || 0),
         weight: String(body.weight || "1.000"),
         status: body.status || "active",
         specifications: body.specifications || {},
-        images: [],
+        images: prodDetail.images || [],
         primary_image: prodDetail.images?.[0] || null,
         in_stock: true,
         stock_quantity: 25,
@@ -793,7 +1122,6 @@ export default {
       };
       st.variants.unshift(newVar);
       st.variant_details[vid] = newVar;
-      if (prodDetail.variants) prodDetail.variants.push(newVar);
       st.stock.push({
         id: crypto.randomUUID(),
         variant: vid,
@@ -809,7 +1137,7 @@ export default {
         updated_at: new Date().toISOString(),
       });
       await saveState(ctx);
-      return jsonResponse(newVar, 201);
+      return jsonResponse(st.variant_details[vid] || newVar, 201);
     }
 
     if (apiPath === "variants" && method === "GET") {
@@ -824,7 +1152,9 @@ export default {
       const ordering = url.searchParams.get("ordering");
 
       if (product) {
-        list = list.filter((v) => String(v.product) === String(product));
+        list = list.filter(
+          (v) => String(v.product_id || v.product) === String(product)
+        );
       }
       if (search) {
         list = list.filter(
@@ -854,7 +1184,7 @@ export default {
         }
         list = list.filter(
           (v) =>
-            matchingCatIds.has(String(v.category_id)) ||
+            matchingCatIds.has(String(v.category_id || v.category?.id)) ||
             String(v.category_name || "").toLowerCase() === String(category).toLowerCase()
         );
       }
@@ -862,7 +1192,7 @@ export default {
         const brandList = brand.split(",").map((b) => b.trim().toLowerCase());
         list = list.filter(
           (v) =>
-            brandList.includes(String(v.brand_id || "").toLowerCase()) ||
+            brandList.includes(String(v.brand_id || v.brand?.id || "").toLowerCase()) ||
             brandList.includes(String(v.brand_name || "").toLowerCase())
         );
       }
@@ -886,10 +1216,12 @@ export default {
           });
         }
       }
-      if (ordering === "price") {
+      if (ordering === "price" || ordering === "base_price") {
         list.sort((a, b) => Number(a.price) - Number(b.price));
-      } else if (ordering === "-price") {
+      } else if (ordering === "-price" || ordering === "-base_price") {
         list.sort((a, b) => Number(b.price) - Number(a.price));
+      } else if (ordering === "name") {
+        list.sort((a, b) => String(a.product_name || a.name).localeCompare(String(b.product_name || b.name)));
       }
 
       const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
@@ -916,15 +1248,16 @@ export default {
         return jsonResponse(v);
       }
       if (method === "PATCH" || method === "PUT") {
-        if (v) Object.assign(v, body);
+        if (v) Object.assign(v, body, { updated_at: new Date().toISOString() });
         const vList = st.variants.find((x) => String(x.id) === vid);
-        if (vList) Object.assign(vList, body);
+        if (vList) Object.assign(vList, body, { updated_at: new Date().toISOString() });
         await saveState(ctx);
-        return jsonResponse(v || {});
+        return jsonResponse(st.variant_details[vid] || v || {});
       }
       if (method === "DELETE") {
         delete st.variant_details[vid];
         st.variants = st.variants.filter((x) => String(x.id) !== vid);
+        st.stock = st.stock.filter((s) => String(s.variant) !== vid);
         await saveState(ctx);
         return jsonResponse({ deleted: true });
       }
@@ -943,30 +1276,50 @@ export default {
           variant: body.variant || null,
           image_url: body.image_url || "",
           alt_text: body.alt_text || "",
-          sort_order: Number(body.sort_order || 1),
+          sort_order: Number(body.sort_order ?? 0),
           is_primary: Boolean(body.is_primary),
           created_at: new Date().toISOString(),
         };
         const prod = st.product_details[body.product];
         if (prod) {
-          prod.images = [...(prod.images || []), img];
-          const pList = st.products.find((p) => String(p.id) === String(body.product));
-          if (pList && (!pList.primary_image || img.is_primary)) {
-            pList.primary_image = img;
+          if (img.is_primary) {
+            for (const existing of prod.images || []) {
+              existing.is_primary = false;
+            }
           }
+          prod.images = [...(prod.images || []), img];
         }
         await saveState(ctx);
         return jsonResponse(img, 201);
       }
     }
     const prodImgMatch = apiPath.match(/^product-images\/([^/]+)$/);
-    if (prodImgMatch && method === "DELETE") {
+    if (prodImgMatch) {
       const iid = prodImgMatch[1];
-      for (const p of Object.values(st.product_details)) {
-        if (p.images) p.images = p.images.filter((i) => String(i.id) !== iid);
+      if (method === "PATCH" || method === "PUT") {
+        let updatedImg = null;
+        for (const p of Object.values(st.product_details)) {
+          if (Array.isArray(p.images)) {
+            const target = p.images.find((i) => String(i.id) === iid);
+            if (target) {
+              if (body.is_primary) {
+                for (const other of p.images) other.is_primary = false;
+              }
+              Object.assign(target, body);
+              updatedImg = target;
+            }
+          }
+        }
+        await saveState(ctx);
+        return jsonResponse(updatedImg || {});
       }
-      await saveState(ctx);
-      return jsonResponse({ deleted: true });
+      if (method === "DELETE") {
+        for (const p of Object.values(st.product_details)) {
+          if (p.images) p.images = p.images.filter((i) => String(i.id) !== iid);
+        }
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
+      }
     }
 
     // --- CATEGORIES, BRANDS, PRODUCT TYPES, SPECS ---
@@ -1061,6 +1414,22 @@ export default {
         st.spec_definitions.push(def);
         await saveState(ctx);
         return jsonResponse(def, 201);
+      }
+    }
+    const specDefMatch = apiPath.match(/^specification-definitions\/([^/]+)$/);
+    if (specDefMatch) {
+      const did = specDefMatch[1];
+      if (method === "PATCH" || method === "PUT") {
+        const d = st.spec_definitions.find((x) => String(x.id) === did);
+        if (d) Object.assign(d, body);
+        await saveState(ctx);
+        return jsonResponse(d || {});
+      }
+      if (method === "DELETE") {
+        st.spec_definitions = st.spec_definitions.filter((x) => String(x.id) !== did);
+        st.spec_options = st.spec_options.filter((o) => String(o.definition) !== did);
+        await saveState(ctx);
+        return jsonResponse({ deleted: true });
       }
     }
     if (apiPath === "specification-options") {
@@ -1226,11 +1595,21 @@ export default {
 
     // --- STOCK ---
     if (apiPath === "stock" && method === "GET") {
+      const search = (url.searchParams.get("search") || "").toLowerCase();
+      let list = [...st.stock];
+      if (search) {
+        list = list.filter(
+          (s) =>
+            (s.product_name || "").toLowerCase().includes(search) ||
+            (s.variant_name || "").toLowerCase().includes(search) ||
+            (s.variant_sku || "").toLowerCase().includes(search)
+        );
+      }
       return jsonResponse({
-        count: st.stock.length,
+        count: list.length,
         next: null,
         previous: null,
-        results: st.stock,
+        results: list,
       });
     }
     if (apiPath === "stock/low" && method === "GET") {
@@ -1238,15 +1617,16 @@ export default {
       return jsonResponse({ count: low.length, results: low });
     }
     if (apiPath === "stock/transactions" && method === "GET") {
-      return jsonResponse({ count: 0, results: [] });
+      const txs = Array.isArray(st.stock_transactions) ? st.stock_transactions : [];
+      return jsonResponse({ count: txs.length, results: txs });
     }
     const stockVarMatch = apiPath.match(/^stock\/([^/]+)$/);
     if (stockVarMatch && method === "GET") {
       const vid = stockVarMatch[1];
       const s = st.stock.find((x) => String(x.variant) === vid) || {
         variant: vid,
-        quantity_available: 25,
-        in_stock: true,
+        quantity_available: 0,
+        in_stock: false,
       };
       return jsonResponse(s);
     }
@@ -1611,10 +1991,31 @@ export default {
       const vid = stockAdjustMatch[1];
       let s = st.stock.find((x) => String(x.variant) === vid);
       const delta = parseInt(body.quantity || 0, 10);
+      const txType = body.type || "adjustment";
       if (s) {
-        s.quantity_available = Math.max(0, Number(s.quantity_available || 0) + delta);
+        if (txType === "damaged") {
+          s.quantity_damaged = Math.max(0, Number(s.quantity_damaged || 0) + Math.abs(delta));
+          s.quantity_available = Math.max(0, Number(s.quantity_available || 0) - Math.abs(delta));
+        } else {
+          s.quantity_available = Math.max(0, Number(s.quantity_available || 0) + delta);
+        }
         s.in_stock = s.quantity_available > 0;
+        s.is_low_stock = s.quantity_available <= Number(s.reorder_level || 5);
         s.updated_at = new Date().toISOString();
+        st.stock_transactions = Array.isArray(st.stock_transactions)
+          ? st.stock_transactions
+          : [];
+        st.stock_transactions.unshift({
+          id: crypto.randomUUID(),
+          variant: vid,
+          variant_name: s.variant_name || s.product_name || "",
+          variant_sku: s.variant_sku || "",
+          type: txType,
+          quantity: txType === "damaged" ? -Math.abs(delta) : delta,
+          note: body.note || "",
+          created_by_email: user?.email || "admin",
+          created_at: new Date().toISOString(),
+        });
       }
       await saveState(ctx);
       return jsonResponse(s || { variant: vid, quantity_available: Math.max(0, delta) });
@@ -1636,6 +2037,25 @@ export default {
     }
     if (apiPath === "reviews" && method === "GET") {
       return jsonResponse(Object.values(st.reviews).flat());
+    }
+    const revMatch = apiPath.match(/^reviews\/([^/]+)$/);
+    if (revMatch) {
+      const rid = revMatch[1];
+      let targetRev = null;
+      for (const pid of Object.keys(st.reviews || {})) {
+        const list = st.reviews[pid] || [];
+        if (method === "DELETE") {
+          st.reviews[pid] = list.filter((r) => String(r.id) !== rid);
+        } else if (method === "PATCH" || method === "PUT") {
+          const found = list.find((r) => String(r.id) === rid);
+          if (found) {
+            Object.assign(found, body);
+            targetRev = found;
+          }
+        }
+      }
+      await saveState(ctx);
+      return jsonResponse(method === "DELETE" ? { deleted: true } : targetRev || {});
     }
     if (apiPath === "audit-logs" && method === "GET") {
       return jsonResponse({ count: st.audit_logs.length, next: null, previous: null, results: st.audit_logs });

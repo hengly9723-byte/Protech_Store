@@ -12,7 +12,7 @@
         "short_description": "",
         "base_price": "0.10",
         "compare_at_price": "0.10",
-        "currency": "USD",
+        "currency": "USD",  
         "status": "active",
         "is_featured": false,
         "is_active": true,
