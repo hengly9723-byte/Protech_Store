@@ -165,6 +165,25 @@ const KhqrPaymentModal = ({
     }
   }, [checkStatus]);
 
+  const handleConfirmPaid = useCallback(async () => {
+    const md5Value = md5Ref.current;
+    if (!md5Value || statusRef.current === "paid") return;
+    setStatus("checking");
+    setCheckError(null);
+    try {
+      const params = { confirm: "1" };
+      const guestEmail = getGuestEmail();
+      if (guestEmail) params.guest_email = guestEmail;
+      const res = await checkKhqrStatusApi(md5Value, params);
+      if (res.data?.paid || res.data?.status === "SUCCESS") {
+        handlePaid(res.data.order || orderRef.current);
+      }
+    } catch {
+      setCheckError("Could not confirm payment. Please try again.");
+      setStatus("pending");
+    }
+  }, [handlePaid]);
+
   const isPaid = status === "paid";
   const isChecking = status === "checking";
 
@@ -312,6 +331,14 @@ const KhqrPaymentModal = ({
             )}
 
             <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={handleConfirmPaid}
+                className="w-full py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <i className="bi bi-check2-circle text-base" />
+                I&apos;ve Completed Payment
+              </button>
               {pollPaused ? (
                 <button
                   type="button"

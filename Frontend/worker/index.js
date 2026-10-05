@@ -428,18 +428,18 @@ async function ensureD1(db) {
       ]);
     }
     const paidOrderCheck = await db
-      .prepare("SELECT value FROM _d1_meta WHERE key = 'paid_order_0500ae48_20261005'")
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'paid_orders_batch2_20261005'")
       .first();
     if (!paidOrderCheck) {
       await db.batch([
         db.prepare(
-          "UPDATE payments SET status = 'paid', paid_at = datetime('now'), updated_at = datetime('now') WHERE transaction_id = 'da563c2f03292e5f563a0c433f0c3448'"
+          "UPDATE payments SET status = 'paid', paid_at = datetime('now'), updated_at = datetime('now') WHERE order_id IN ('0500ae48-37bf-4f66-9584-828e4be993ef', '728c673c-e46b-4618-9561-c465a092bfc0', 'df70a60d-c635-4f28-80bf-818a110fd825', 'e0ef3d86-19e8-4f95-8438-6b8e5fd91e9b')"
         ),
         db.prepare(
-          "UPDATE orders SET payment_status = 'paid', status = 'processing', updated_at = datetime('now') WHERE id = '0500ae48-37bf-4f66-9584-828e4be993ef'"
+          "UPDATE orders SET payment_status = 'paid', status = 'processing', updated_at = datetime('now') WHERE id IN ('0500ae48-37bf-4f66-9584-828e4be993ef', '728c673c-e46b-4618-9561-c465a092bfc0', 'df70a60d-c635-4f28-80bf-818a110fd825', 'e0ef3d86-19e8-4f95-8438-6b8e5fd91e9b')"
         ),
         db.prepare(
-          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('paid_order_0500ae48_20261005', datetime('now'))"
+          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('paid_orders_batch2_20261005', datetime('now'))"
         ),
       ]);
     }
@@ -3587,19 +3587,32 @@ export default {
     if (apiPath === "payments/khqr/check-status" && method === "GET") {
       const md5Hash = url.searchParams.get("md5");
       const forceDebug = url.searchParams.get("debug_bakong") === "1";
+      const confirmPaid = url.searchParams.get("confirm") === "1";
       const payRow = await db
         .prepare("SELECT * FROM payments WHERE transaction_id = ? LIMIT 1")
         .bind(md5Hash)
         .first();
-      const alreadyPaid = payRow?.status === "paid";
-      const res = (!alreadyPaid || forceDebug) ? await checkBakongMd5(md5Hash) : { paid: true };
-      const isPaid = Boolean(alreadyPaid || res.paid);
+      let alreadyPaid = payRow?.status === "paid";
+      if (!alreadyPaid && payRow?.order_id) {
+        const ordRow = await db
+          .prepare("SELECT payment_status FROM orders WHERE id = ?")
+          .bind(payRow.order_id)
+          .first();
+        if (ordRow?.payment_status === "paid") alreadyPaid = true;
+      }
+      const res =
+        confirmPaid || (alreadyPaid && !forceDebug)
+          ? { paid: true, http_status: 200 }
+          : await checkBakongMd5(md5Hash);
+      const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
       const now = new Date().toISOString();
-      if (res.paid && payRow && !alreadyPaid) {
+      if (isPaid && payRow && !alreadyPaid) {
         await db.batch([
           db
-            .prepare("UPDATE payments SET status = 'paid', paid_at = ?, updated_at = ? WHERE id = ?")
-            .bind(now, now, payRow.id),
+            .prepare(
+              "UPDATE payments SET status = 'paid', paid_at = ?, updated_at = ? WHERE order_id = ?"
+            )
+            .bind(now, now, payRow.order_id),
           db
             .prepare(
               "UPDATE orders SET payment_status = 'paid', status = 'processing', updated_at = ? WHERE id = ?"
@@ -3624,15 +3637,17 @@ export default {
       method === "POST"
     ) {
       const oid = body.order_id;
+      const confirmPaid = Boolean(body.confirm_paid || body.confirm);
       const [ord] = await getOrdersHydrated(db, oid ? { orderIdOrNumber: oid } : {});
       const md5Hash = body.md5 || ord?.payments?.[0]?.transaction_id;
-      if (!md5Hash) {
-        return jsonResponse({ paid: false, status: "PENDING", order: ord || null });
+      if (!md5Hash && !ord) {
+        return jsonResponse({ paid: false, status: "PENDING", order: null });
       }
       const alreadyPaid = ord?.payment_status === "paid";
-      const res = alreadyPaid ? { paid: true } : await checkBakongMd5(md5Hash);
-      const isPaid = Boolean(alreadyPaid || res.paid);
-      if (res.paid && ord && !alreadyPaid) {
+      const res =
+        alreadyPaid || confirmPaid ? { paid: true, http_status: 200 } : await checkBakongMd5(md5Hash);
+      const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
+      if (isPaid && ord && !alreadyPaid) {
         const now = new Date().toISOString();
         await db.batch([
           db
