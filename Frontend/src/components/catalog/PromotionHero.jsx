@@ -238,7 +238,7 @@ export const PromotionHero = ({
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      {/* 1 & 2. Main Wide Banner Visual Container (Strict Proportional Scaling via aspect-[21/9]) */}
+      {/* 1 & 2. Main Wide Banner Visual Container (Auto height to display full image without cropping) */}
       <div
         role="button"
         tabIndex={0}
@@ -246,16 +246,18 @@ export const PromotionHero = ({
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") scrollToCatalog(e);
         }}
-        className="relative w-full aspect-[21/9] rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl border border-zinc-800/80 bg-zinc-950 transition-all duration-500 cursor-pointer group select-none"
+        className={`relative w-full ${
+          bannerImg ? "h-auto" : "aspect-[21/9] min-h-[200px]"
+        } rounded-2xl sm:rounded-3xl overflow-hidden shadow-2xl border border-zinc-800/80 bg-zinc-950 transition-all duration-500 cursor-pointer group select-none`}
         aria-label={`Campaign Banner: ${currentPromo.name || "Seasonal Fest"}`}
       >
-        {/* Background Visual: 1920x600 Banner Image OR Styled Gradient */}
+        {/* Background Visual: Natural Auto-height Banner Image OR Styled Gradient */}
         {bannerImg ? (
-          <div className="absolute inset-0 w-full h-full overflow-hidden">
+          <div className="relative w-full overflow-hidden">
             <img
               src={bannerImg}
               alt={currentPromo.name || "Promotion Banner"}
-              className="w-full h-full object-cover object-center transform scale-100 group-hover:scale-[1.015] transition-transform duration-700 ease-out"
+              className="w-full h-auto block select-none transform scale-100 group-hover:scale-[1.015] transition-transform duration-700 ease-out"
             />
             {/* Soft gradient scrim at top-left to ensure badges pop cleanly over any background image */}
             <div className="absolute inset-0 bg-gradient-to-br from-black/45 via-black/10 to-transparent pointer-events-none" />
