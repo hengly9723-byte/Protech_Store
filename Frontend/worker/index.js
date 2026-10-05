@@ -750,7 +750,24 @@ async function getBrandsList(db) {
 }
 
 async function getProductTypesList(db) {
-  const { results } = await db.prepare("SELECT * FROM product_types ORDER BY name ASC").all();
+  let { results } = await db.prepare("SELECT * FROM product_types ORDER BY name ASC").all();
+  if (!results || results.length === 0) {
+    const coreTypes = [
+      ["11111111-0000-0000-0000-000000000001", "Physical", 1, 1, "Physical hardware requiring shipping and inventory"],
+      ["11111111-0000-0000-0000-000000000002", "Digital", 0, 0, "Digital license or software key"],
+      ["11111111-0000-0000-0000-000000000003", "Service", 0, 0, "Warranty or repair service"],
+    ];
+    for (const [id, name, reqShip, reqStock, desc] of coreTypes) {
+      await db
+        .prepare(
+          "INSERT OR IGNORE INTO product_types (id, name, requires_shipping, requires_stock, description) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(id, name, reqShip, reqStock, desc)
+        .run();
+    }
+    const res = await db.prepare("SELECT * FROM product_types ORDER BY name ASC").all();
+    results = res.results;
+  }
   return (results || []).map((t) => ({
     id: t.id,
     name: t.name,
@@ -2427,10 +2444,37 @@ export default {
 
     if (apiPath === "specification-definitions") {
       if (method === "GET") {
-        const [{ results: defs }, { results: opts }] = await Promise.all([
+        let [{ results: defs }, { results: opts }] = await Promise.all([
           db.prepare("SELECT * FROM specification_definitions ORDER BY sort_order ASC").all(),
           db.prepare("SELECT * FROM specification_options ORDER BY sort_order ASC").all(),
         ]);
+        const coreSpecs = [
+          ["44444444-0000-0000-0000-000000000001", "OS", "os", 1],
+          ["44444444-0000-0000-0000-000000000002", "Processor", "processor", 2],
+          ["44444444-0000-0000-0000-000000000003", "Graphics", "graphics", 3],
+          ["44444444-0000-0000-0000-000000000004", "RAM", "ram", 4],
+          ["44444444-0000-0000-0000-000000000005", "Storage", "storage", 5],
+          ["44444444-0000-0000-0000-000000000006", "Display", "display", 6],
+        ];
+        const existingNames = new Set((defs || []).map((d) => d.name));
+        let insertedCore = false;
+        for (const [id, name, slug, sortOrder] of coreSpecs) {
+          if (!existingNames.has(name)) {
+            await db
+              .prepare(
+                "INSERT OR IGNORE INTO specification_definitions (id, category_id, name, slug, data_type, is_filterable, is_required, sort_order) VALUES (?, NULL, ?, ?, 'text', 1, 0, ?)"
+              )
+              .bind(id, name, slug, sortOrder)
+              .run();
+            insertedCore = true;
+          }
+        }
+        if (insertedCore) {
+          const refreshed = await db
+            .prepare("SELECT * FROM specification_definitions ORDER BY sort_order ASC")
+            .all();
+          defs = refreshed.results;
+        }
         const optsByDef = new Map();
         for (const o of opts || []) {
           const did = String(o.definition_id);
