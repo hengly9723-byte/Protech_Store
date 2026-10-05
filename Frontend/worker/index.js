@@ -1,6 +1,7 @@
 // ============================================================================
 // Protech Store — Cloudflare Worker API Backed by Cloudflare D1 (SQLite)
 // ============================================================================
+import { WorkerMailer } from "worker-mailer";
 
 let schemaInitialized = false;
 
@@ -1504,36 +1505,139 @@ export default {
           .prepare("UPDATE users SET password_reset_token = ?, password_reset_expires = ?, updated_at = ? WHERE id = ?")
           .bind(resetToken, expires, now, row.id)
           .run();
+
+        const frontendUrl = (env.FRONTEND_URL || url.origin).replace(/\/+$/, "");
+        const resetUrl = `${frontendUrl}/reset-password?token=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(row.email)}`;
+        const recipientName = row.full_name || "there";
+        const subject = "Password Reset Request - Protech Store";
+        const textBody =
+          `Hello ${recipientName},\n\n` +
+          `You requested a password reset for your Protech Store account.\n\n` +
+          `Your Reset Token:\n${resetToken}\n\n` +
+          `Or click the link below to set a new password directly:\n${resetUrl}\n\n` +
+          `This token will expire in 1 hour.\n` +
+          `If you did not request this, please ignore this email.`;
+        const htmlBody = `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; border: 1px solid #e5e7eb; border-radius: 16px; color: #111827;">
+            <h2 style="margin: 0 0 12px; font-size: 20px; font-weight: 800;">Password Reset Request</h2>
+            <p style="margin: 0 0 16px; font-size: 14px; color: #4b5563; line-height: 1.6;">
+              Hello <strong>${recipientName}</strong>, you requested a password reset for your Protech Store account.
+            </p>
+            <div style="margin: 20px 0; padding: 14px 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px;">
+              <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 6px;">
+                Your Reset Token
+              </div>
+              <div style="font-family: monospace; font-size: 15px; font-weight: 700; color: #111827; word-break: break-all;">
+                ${resetToken}
+              </div>
+            </div>
+            <p style="margin: 20px 0;">
+              <a href="${resetUrl}" style="display: inline-block; padding: 12px 24px; background: #111827; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 14px; border-radius: 10px;">
+                Reset Password
+              </a>
+            </p>
+            <p style="margin: 16px 0 0; font-size: 12px; color: #9ca3af;">
+              This token expires in 1 hour. If you did not request a password reset, you can safely ignore this email.
+            </p>
+          </div>
+        `;
+
+        const smtpHost = env.EMAIL_HOST || "smtp.gmail.com";
+        const smtpUser = env.EMAIL_HOST_USER || "hengly9723@gmail.com";
+        const smtpPassword = env.EMAIL_HOST_PASSWORD || "acyuzizkjdtrtksq";
+
+        try {
+          if (env.RESEND_API_KEY) {
+            const resendRes = await fetch("https://api.resend.com/emails", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${env.RESEND_API_KEY}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                from: env.DEFAULT_FROM_EMAIL || `Protech Store <onboarding@resend.dev>`,
+                to: [row.email],
+                subject,
+                text: textBody,
+                html: htmlBody,
+              }),
+            });
+            if (!resendRes.ok) {
+              const errText = await resendRes.text();
+              throw new Error(`Resend API error: ${errText}`);
+            }
+          } else {
+            try {
+              await WorkerMailer.send(
+                {
+                  host: smtpHost,
+                  port: Number(env.EMAIL_PORT || 587),
+                  secure: false,
+                  startTls: true,
+                  authType: ["plain", "login"],
+                  credentials: {
+                    username: smtpUser,
+                    password: smtpPassword,
+                  },
+                },
+                {
+                  from: { name: "Protech Store", email: smtpUser },
+                  to: row.email,
+                  subject,
+                  text: textBody,
+                  html: htmlBody,
+                }
+              );
+            } catch (err587) {
+              // Fallback to implicit TLS on port 465 if port 587 STARTTLS fails
+              await WorkerMailer.send(
+                {
+                  host: smtpHost,
+                  port: 465,
+                  secure: true,
+                  startTls: false,
+                  authType: ["plain", "login"],
+                  credentials: {
+                    username: smtpUser,
+                    password: smtpPassword,
+                  },
+                },
+                {
+                  from: { name: "Protech Store", email: smtpUser },
+                  to: row.email,
+                  subject,
+                  text: textBody,
+                  html: htmlBody,
+                }
+              );
+            }
+          }
+        } catch (mailErr) {
+          console.error("Failed to send password reset email:", mailErr);
+          return jsonResponse(
+            { error: `Failed to send password reset email: ${mailErr.message || String(mailErr)}` },
+            500
+          );
+        }
       }
       return jsonResponse({
-        message: "If an account exists for this email, a password reset token has been generated.",
-        reset_token: resetToken,
+        message: "If an account exists with this email, a password reset link has been sent.",
       });
     }
 
     if (apiPath === "auth/reset-password" && method === "POST") {
       const token = String(body.token || "").trim();
       const newPassword = String(body.password || body.new_password || "");
+      if (!token) {
+        return jsonResponse({ error: "Reset token is required." }, 400);
+      }
       if (!newPassword || newPassword.length < 8) {
         return jsonResponse({ error: "Password must be at least 8 characters long." }, 400);
       }
-      let row = null;
-      if (token) {
-        row = await db
-          .prepare("SELECT * FROM users WHERE password_reset_token = ?")
-          .bind(token)
-          .first();
-      }
-      if (!row) {
-        row = await db
-          .prepare("SELECT * FROM users WHERE password_reset_token IS NOT NULL ORDER BY updated_at DESC LIMIT 1")
-          .first();
-      }
-      if (!row) {
-        row = await db
-          .prepare("SELECT * FROM users WHERE lower(email) = 'hengly9723@gmail.com'")
-          .first();
-      }
+      const row = await db
+        .prepare("SELECT * FROM users WHERE password_reset_token = ?")
+        .bind(token)
+        .first();
       if (!row) {
         return jsonResponse({ error: "Invalid or expired reset token." }, 400);
       }

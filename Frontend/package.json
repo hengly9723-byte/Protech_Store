@@ -22,7 +22,8 @@
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0",
     "react-router-dom": "^7.18.2",
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.3",
+    "worker-mailer": "^1.2.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

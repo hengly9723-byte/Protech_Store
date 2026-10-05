@@ -212,7 +212,6 @@ export const AuthProvider = ({ children }) => {
       return {
         success: true,
         message: res.data.message,
-        reset_token: res.data.reset_token || null,
       };
     } catch (err) {
       return { success: false, error: err.response?.data?.error || "Failed to request password reset." };

@@ -8,7 +8,6 @@ const ForgotPasswordPage = () => {
   const [email, setEmail] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [resetToken, setResetToken] = useState("");
   const [error, setError] = useState(null);
 
   const handleSubmit = async (e) => {
@@ -22,9 +21,6 @@ const ForgotPasswordPage = () => {
     setIsLoading(false);
 
     if (result.success) {
-      if (result.reset_token) {
-        setResetToken(result.reset_token);
-      }
       setSuccess(true);
     } else {
       setError(result.error);
@@ -39,23 +35,19 @@ const ForgotPasswordPage = () => {
             <i className="bi bi-envelope-check-fill" />
           </div>
           <h2 className="text-2xl font-black text-gray-900">
-            Reset Token Generated
+            Check Your Email
           </h2>
           <p className="text-sm text-gray-600 mt-2 leading-relaxed">
-            Your password reset token for{" "}
-            <span className="font-bold text-gray-900">{email}</span> is ready:
+            If an account exists for{" "}
+            <span className="font-bold text-gray-900">{email}</span>, we have
+            sent instructions and a reset token to your inbox.
           </p>
-          {resetToken && (
-            <div className="mt-4 p-3 rounded-xl bg-gray-50 border border-gray-200 font-mono text-xs text-gray-800 select-all break-all">
-              {resetToken}
-            </div>
-          )}
-          <div className="mt-6 flex flex-col gap-3">
+          <div className="mt-8 flex flex-col gap-3">
             <Link
-              to={resetToken ? `/reset-password?token=${encodeURIComponent(resetToken)}` : "/reset-password"}
+              to="/reset-password"
               className="w-full py-3.5 px-4 rounded-xl bg-button hover:bg-button-hover text-white font-bold text-sm shadow-md transition-all"
             >
-              Set New Password Now
+              Enter Reset Token
             </Link>
             <Link
               to="/login"
