@@ -403,6 +403,19 @@ async function ensureD1(db) {
     if (!wipeCheck) {
       await db.batch(WIPE_ALL_TABLES_SQL.map((sql) => db.prepare(sql)));
     }
+    const stockZeroCheck = await db
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'reset_default_stock_20261005'")
+      .first();
+    if (!stockZeroCheck) {
+      await db.batch([
+        db.prepare(
+          "UPDATE stock SET quantity_available = 0 WHERE quantity_available = 25 AND variant_id NOT IN (SELECT variant_id FROM stock_transactions WHERE variant_id IS NOT NULL)"
+        ),
+        db.prepare(
+          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('reset_default_stock_20261005', datetime('now'))"
+        ),
+      ]);
+    }
     schemaInitialized = true;
   } catch (err) {
     console.error("D1 schema init error:", err);
@@ -1973,7 +1986,7 @@ export default {
               id, variant_id, quantity_available, quantity_reserved, quantity_damaged, reorder_level, updated_at
             ) VALUES (?, ?, ?, 0, 0, 5, ?)`
           )
-          .bind(crypto.randomUUID(), vid, Number(body.stock_quantity ?? 25), now),
+          .bind(crypto.randomUUID(), vid, Number(body.stock_quantity ?? 0), now),
         db
           .prepare(
             `UPDATE products SET
