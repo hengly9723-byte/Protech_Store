@@ -131,7 +131,9 @@ const ProductFormPage = () => {
   const [saving, setSaving] = useState(false);
 
   const [variantModal, setVariantModal] = useState(null);
+  const [savingVariant, setSavingVariant] = useState(false);
   const [imageModal, setImageModal] = useState(null);
+  const [savingImage, setSavingImage] = useState(false);
 
   const loadMeta = useCallback(async () => {
     const [catRes, brandRes, typeRes, specRes, optRes] = await Promise.all([
@@ -325,6 +327,7 @@ const ProductFormPage = () => {
   const saveVariant = async () => {
     const v = variantModal;
     if (!v.sku) return alert("SKU is required.");
+    setSavingVariant(true);
     const cleanSpecs = {};
     for (const key of HW_SPEC_KEYS) {
       const val = v.specifications?.[key]?.trim();
@@ -357,6 +360,8 @@ const ProductFormPage = () => {
             .join(", ") ||
           "Failed to save variant.",
       );
+    } finally {
+      setSavingVariant(false);
     }
   };
 
@@ -426,6 +431,7 @@ const ProductFormPage = () => {
   const saveImage = async () => {
     const img = imageModal;
     if (!img.image_url) return alert("Image URL is required.");
+    setSavingImage(true);
     const payload = {
       ...img,
       product: isEdit ? id : product?.id,
@@ -446,6 +452,8 @@ const ProductFormPage = () => {
             .join(", ") ||
           "Failed to save image.",
       );
+    } finally {
+      setSavingImage(false);
     }
   };
   const deleteImage = async (img) => {
@@ -1147,7 +1155,9 @@ const ProductFormPage = () => {
               <Button variant="secondary" onClick={() => setVariantModal(null)}>
                 Cancel
               </Button>
-              <Button onClick={saveVariant}>Save Variant</Button>
+              <Button onClick={saveVariant} disabled={savingVariant}>
+                {savingVariant ? "Saving..." : "Save Variant"}
+              </Button>
             </div>
           </div>
         )}
@@ -1220,7 +1230,9 @@ const ProductFormPage = () => {
               <Button variant="secondary" onClick={() => setImageModal(null)}>
                 Cancel
               </Button>
-              <Button onClick={saveImage}>Save Image</Button>
+              <Button onClick={saveImage} disabled={savingImage}>
+                {savingImage ? "Saving..." : "Save Image"}
+              </Button>
             </div>
           </div>
         )}
