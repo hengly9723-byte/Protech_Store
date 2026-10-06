@@ -1064,7 +1064,7 @@ function decodeJwtPayload(jwt) {
   }
 }
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -1072,6 +1072,7 @@ function jsonResponse(data, status = 200) {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "*",
+      ...headers,
     },
   });
 }
@@ -1385,13 +1386,184 @@ async function getAllProductsHydrated(db) {
 }
 
 async function getPromotionsHydrated(db, productsList = null) {
-  const prods = productsList || (await getAllProductsHydrated(db)).products;
-  const prodMap = new Map(prods.map((p) => [String(p.id), p]));
-
   const [{ results: promoRows }, { results: linkRows }] = await Promise.all([
     db.prepare("SELECT * FROM promotions ORDER BY created_at DESC").all(),
     db.prepare("SELECT * FROM promotion_products").all(),
   ]);
+
+  if (!promoRows || promoRows.length === 0) {
+    return [];
+  }
+
+  const prods = productsList || (await getAllProductsHydrated(db)).products;
+  const prodMap = new Map(prods.map((p) => [String(p.id), p]));
+
+  const linksByPromo = new Map();
+  for (const l of linkRows || []) {
+    const pid = String(l.promotion_id);
+    if (!linksByPromo.has(pid)) linksByPromo.set(pid, []);
+    const matched = prodMap.get(String(l.product_id));
+    if (matched) linksByPromo.get(pid).push(matched);
+  }
+
+  return (promoRows || []).map((r) => {
+    const linked = linksByPromo.get(String(r.id)) || [];
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description || "",
+      type: r.type || "seasonal",
+      banner_image_url: r.banner_image_url || "",
+      bannerImageUrl: r.banner_image_url || "",
+      discount_type: r.discount_type || "percentage",
+      discountType: r.discount_type || "percentage",
+      discount_value: String(r.discount_value || "0.00"),
+      discountValue: String(r.discount_value || "0.00"),
+      starts_at: r.starts_at,
+      ends_at: r.ends_at,
+      is_active: Boolean(r.is_active),
+      products: linked,
+      featuredProducts: linked,
+      products_count: linked.length,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    };
+  });
+}
+
+// Highly optimized query for active promotions: avoids scanning the entire store catalog.
+// Only queries active campaigns and the exact products linked to those campaigns.
+async function getActivePromotionsHydrated(db) {
+  const nowIso = new Date().toISOString();
+  const { results: promoRows } = await db
+    .prepare(
+      `SELECT * FROM promotions 
+       WHERE is_active = 1 
+         AND (starts_at IS NULL OR starts_at <= ?) 
+         AND (ends_at IS NULL OR ends_at >= ?)
+       ORDER BY created_at DESC`
+    )
+    .bind(nowIso, nowIso)
+    .all();
+
+  if (!promoRows || promoRows.length === 0) {
+    return [];
+  }
+
+  const promoIds = promoRows.map((r) => r.id);
+  const promoPlaceholders = promoIds.map(() => "?").join(",");
+
+  const { results: linkRows } = await db
+    .prepare(
+      `SELECT promotion_id, product_id FROM promotion_products WHERE promotion_id IN (${promoPlaceholders})`
+    )
+    .bind(...promoIds)
+    .all();
+
+  const productIds = Array.from(new Set((linkRows || []).map((l) => String(l.product_id))));
+  const prodMap = new Map();
+
+  if (productIds.length > 0) {
+    const prodPlaceholders = productIds.map(() => "?").join(",");
+    const [
+      { results: prodRows },
+      { results: varRows },
+      { results: imgRows },
+      brands,
+      catsFlat,
+      types,
+    ] = await Promise.all([
+      db.prepare(`SELECT * FROM products WHERE id IN (${prodPlaceholders})`).bind(...productIds).all(),
+      db.prepare(`SELECT * FROM product_variants WHERE product_id IN (${prodPlaceholders}) ORDER BY created_at ASC`).bind(...productIds).all(),
+      db.prepare(`SELECT * FROM product_images WHERE product_id IN (${prodPlaceholders}) ORDER BY is_primary DESC, sort_order ASC, created_at ASC`).bind(...productIds).all(),
+      getBrandsList(db),
+      getCategoriesFlat(db),
+      getProductTypesList(db),
+    ]);
+
+    const brandMap = new Map((brands || []).map((b) => [String(b.id), b]));
+    const catMap = new Map((catsFlat || []).map((c) => [String(c.id), c]));
+    const typeMap = new Map((types || []).map((t) => [String(t.id), t]));
+
+    const imgsByProd = new Map();
+    for (const img of imgRows || []) {
+      const pid = String(img.product_id);
+      if (!imgsByProd.has(pid)) imgsByProd.set(pid, []);
+      imgsByProd.get(pid).push({
+        id: img.id,
+        product: img.product_id,
+        variant: img.variant_id || null,
+        image_url: img.image_url,
+        alt_text: img.alt_text || "",
+        sort_order: Number(img.sort_order || 0),
+        is_primary: Boolean(img.is_primary),
+      });
+    }
+
+    const varsByProd = new Map();
+    for (const v of varRows || []) {
+      const pid = String(v.product_id);
+      if (!varsByProd.has(pid)) varsByProd.set(pid, []);
+      varsByProd.get(pid).push({
+        id: v.id,
+        product_id: pid,
+        sku: v.sku,
+        name: v.name || "",
+        price: String(v.price || "0.00"),
+        compare_at_price: String(v.compare_at_price || v.price || "0.00"),
+        specifications: safeJsonParse(v.specifications, {}),
+      });
+    }
+
+    for (const p of prodRows || []) {
+      const pid = String(p.id);
+      const brandObj = brandMap.get(String(p.brand_id)) || null;
+      const catObj = catMap.get(String(p.category_id)) || null;
+      const typeObj = typeMap.get(String(p.type_id)) || types[0] || null;
+      const pVars = varsByProd.get(pid) || [];
+      const pImgs = imgsByProd.get(pid) || [];
+      const primaryImg = pImgs.find((i) => i.is_primary) || pImgs[0] || null;
+
+      const effectivePrice =
+        pVars.length > 0 && Number(p.base_price || 0) === 0
+          ? String(pVars[0].price)
+          : String(p.base_price || pVars[0]?.price || "0.00");
+      const effectiveCompare =
+        pVars.length > 0 && Number(p.compare_at_price || 0) === 0
+          ? String(pVars[0].compare_at_price || pVars[0].price)
+          : String(p.compare_at_price || effectivePrice);
+
+      prodMap.set(pid, {
+        id: p.id,
+        name: p.name,
+        slug: p.slug,
+        sku: p.sku || pVars[0]?.sku || "",
+        short_description: p.short_description || "",
+        description: p.description || "",
+        base_price: effectivePrice,
+        compare_at_price: effectiveCompare,
+        currency: p.currency || "USD",
+        status: p.status || "active",
+        is_featured: Boolean(p.is_featured),
+        is_active: Boolean(p.is_active),
+        brand: brandObj?.id || null,
+        brand_id: brandObj?.id || null,
+        brand_name: brandObj?.name || "",
+        category: catObj?.id || null,
+        category_id: catObj?.id || null,
+        category_name: catObj?.name || "",
+        type: typeObj?.id || null,
+        type_id: typeObj?.id || null,
+        type_name: typeObj?.name || "Physical",
+        primary_image: primaryImg,
+        images: pImgs,
+        variants: pVars,
+        variants_count: pVars.length,
+        created_at: p.created_at,
+        updated_at: p.updated_at,
+      });
+    }
+  }
 
   const linksByPromo = new Map();
   for (const l of linkRows || []) {
@@ -3301,8 +3473,35 @@ export default {
 
     // --- PROMOTIONS & DISCOUNT CODES ---
     if (apiPath === "promotions/active" && method === "GET") {
-      const all = await getPromotionsHydrated(db);
-      return jsonResponse(all.filter((p) => p.is_active));
+      const active = await getActivePromotionsHydrated(db);
+      return jsonResponse(active, 200, {
+        "Cache-Control": "public, s-maxage=300, stale-while-revalidate=600",
+      });
+    }
+
+    if (apiPath === "promotions/upload-banner" && method === "POST") {
+      try {
+        const formData = await request.formData();
+        const file = formData.get("banner") || formData.get("file") || formData.get("image");
+        if (!file || typeof file === "string") {
+          return jsonResponse({ error: "No image file was uploaded." }, 400);
+        }
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const base64 = btoa(binary);
+        const mimeType = file.type || "image/webp";
+        const dataUrl = `data:${mimeType};base64,${base64}`;
+        return jsonResponse({
+          banner_image_url: dataUrl,
+          bannerImageUrl: dataUrl,
+        });
+      } catch (err) {
+        return jsonResponse({ error: "Failed to process banner upload." }, 400);
+      }
     }
 
     if (apiPath === "promotions") {

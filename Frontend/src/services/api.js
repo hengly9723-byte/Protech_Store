@@ -327,16 +327,75 @@ export const getLowStockApi = (params = {}) => api.get("/stock/low", { params })
 export const getStockTransactionsApi = (params = {}) => api.get("/stock/transactions/", { params });
 export const adjustStockApi = (variantId, data) => api.post(`/stock/${variantId}/adjust`, data);
 
-// Marketing
+// Marketing & Active Promotions Cache (Client-side staleTime = 5 mins)
+let activePromotionsCache = {
+  data: null,
+  timestamp: 0,
+  promise: null,
+};
+const PROMOTIONS_STALE_TIME_MS = 5 * 60 * 1000;
+
+export const invalidatePromotionsCache = () => {
+  activePromotionsCache = {
+    data: null,
+    timestamp: 0,
+    promise: null,
+  };
+};
+
 export const getAdminDiscountCodesApi = () => api.get("/discount-codes/");
 export const createDiscountCodeApi = (data) => api.post("/discount-codes/", data);
 export const updateDiscountCodeApi = (id, data) => api.patch(`/discount-codes/${id}/`, data);
 export const deleteDiscountCodeApi = (id) => api.delete(`/discount-codes/${id}/`);
 export const getAdminPromotionsApi = () => api.get("/promotions/");
-export const getActivePromotionsApi = () => api.get("/promotions/active/");
-export const createPromotionApi = (data) => api.post("/promotions/", data);
-export const updatePromotionApi = (id, data) => api.patch(`/promotions/${id}/`, data);
-export const deletePromotionApi = (id) => api.delete(`/promotions/${id}/`);
+
+export const getActivePromotionsApi = (options = {}) => {
+  const { forceRefresh = false } = options;
+  const now = Date.now();
+
+  // Return unexpired cached data immediately (staleTime = 5m)
+  if (
+    !forceRefresh &&
+    activePromotionsCache.data &&
+    now - activePromotionsCache.timestamp < PROMOTIONS_STALE_TIME_MS
+  ) {
+    return Promise.resolve({ data: activePromotionsCache.data });
+  }
+
+  // Deduplicate concurrent in-flight requests across parallel component mounts
+  if (!forceRefresh && activePromotionsCache.promise) {
+    return activePromotionsCache.promise;
+  }
+
+  const reqPromise = api
+    .get("/promotions/active/")
+    .then((res) => {
+      activePromotionsCache.data = res.data;
+      activePromotionsCache.timestamp = Date.now();
+      activePromotionsCache.promise = null;
+      return res;
+    })
+    .catch((err) => {
+      activePromotionsCache.promise = null;
+      throw err;
+    });
+
+  activePromotionsCache.promise = reqPromise;
+  return reqPromise;
+};
+
+export const createPromotionApi = (data) => {
+  invalidatePromotionsCache();
+  return api.post("/promotions/", data);
+};
+export const updatePromotionApi = (id, data) => {
+  invalidatePromotionsCache();
+  return api.patch(`/promotions/${id}/`, data);
+};
+export const deletePromotionApi = (id) => {
+  invalidatePromotionsCache();
+  return api.delete(`/promotions/${id}/`);
+};
 export const uploadPromotionBannerApi = (file) => {
   const formData = new FormData();
   formData.append("banner", file);

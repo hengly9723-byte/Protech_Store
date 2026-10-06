@@ -99,17 +99,60 @@ const PromotionsPage = () => {
     );
   };
 
+  const convertImageToWebP = (file) => {
+    return new Promise((resolve) => {
+      if (file.type === "image/webp") {
+        resolve(file);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob(
+            (blob) => {
+              if (blob) {
+                const webpFile = new File(
+                  [blob],
+                  file.name.replace(/\.[^.]+$/, "") + ".webp",
+                  { type: "image/webp" }
+                );
+                resolve(webpFile);
+              } else {
+                resolve(file);
+              }
+            },
+            "image/webp",
+            0.88
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = event.target.result;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
 
     // Validate size (max 25MB)
-    if (file.size > 25 * 1024 * 1024) {
+    if (rawFile.size > 25 * 1024 * 1024) {
       setUploadError("Image exceeds 25MB size limit. Please upload a smaller image.");
       return;
     }
 
     setUploadError("");
+
+    // Convert to modern WebP format for fast delivery
+    const file = await convertImageToWebP(rawFile);
 
     // Instant local preview for immediate visual feedback
     const localPreview = URL.createObjectURL(file);

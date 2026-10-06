@@ -20,6 +20,7 @@ const ProductCatalogPage = () => {
   const [products, setProducts] = useState([]);
   const [activePromotions, setActivePromotions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isPromotionsLoading, setIsPromotionsLoading] = useState(true);
   const [totalCount, setTotalCount] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
@@ -88,8 +89,10 @@ const ProductCatalogPage = () => {
     loadProducts();
   }, [loadProducts]);
 
+  // Parallel fetch: retrieve active promotional campaigns concurrently with products
   useEffect(() => {
     let isMounted = true;
+    setIsPromotionsLoading(true);
     getActivePromotionsApi()
       .then((res) => {
         if (!isMounted) return;
@@ -98,6 +101,9 @@ const ProductCatalogPage = () => {
       })
       .catch((err) => {
         console.warn("Could not load active promotions for catalog:", err);
+      })
+      .finally(() => {
+        if (isMounted) setIsPromotionsLoading(false);
       });
     return () => {
       isMounted = false;
@@ -171,6 +177,7 @@ const ProductCatalogPage = () => {
         <PromotionHero
           promotions={activePromotions}
           promotion={activePromotions[0] || null}
+          isLoading={isPromotionsLoading}
         />
       </div>
 

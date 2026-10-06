@@ -272,7 +272,9 @@ class PromotionViewSet(viewsets.ModelViewSet):
         )
 
         serializer = PromotionSerializer(active_promos, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        response = Response(serializer.data, status=status.HTTP_200_OK)
+        response['Cache-Control'] = 'public, s-maxage=300, stale-while-revalidate=600'
+        return response
 
     @action(
         detail=False,

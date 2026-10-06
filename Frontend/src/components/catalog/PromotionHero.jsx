@@ -80,6 +80,7 @@ export const PromotionHero = ({
   promotions = null,
   autoRotateInterval = 6000,
   className = "",
+  isLoading = undefined,
 }) => {
   const [fetchedPromos, setFetchedPromos] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -87,7 +88,9 @@ export const PromotionHero = ({
   const [isHovered, setIsHovered] = useState(false);
 
   useEffect(() => {
-    if (promotion || (promotions && promotions.length > 0)) return;
+    // If parent passed promotion or promotions array (even if empty []),
+    // do not trigger internal standalone fetch to eliminate waterfalls and duplicate requests.
+    if (promotion !== null || promotions !== null) return;
 
     let isMounted = true;
     setLoading(true);
@@ -151,8 +154,10 @@ export const PromotionHero = ({
     }
   };
 
+  const isEffectiveLoading = isLoading !== undefined ? isLoading : loading;
+
   // Loading skeleton with proportional aspect ratio
-  if (loading && !currentPromo) {
+  if (isEffectiveLoading && !currentPromo) {
     return (
       <div className={`w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mb-8 ${className}`}>
         <div className="w-full aspect-[21/9] min-h-[160px] rounded-2xl sm:rounded-3xl bg-zinc-900/80 animate-pulse border border-zinc-800 flex items-center justify-center p-6">
@@ -254,11 +259,23 @@ export const PromotionHero = ({
         {/* Background Visual: Natural Auto-height Banner Image OR Styled Gradient */}
         {bannerImg ? (
           <div className="relative w-full overflow-hidden">
-            <img
-              src={bannerImg}
-              alt={currentPromo.name || "Promotion Banner"}
-              className="w-full h-auto block select-none transform scale-100 group-hover:scale-[1.015] transition-transform duration-700 ease-out"
-            />
+            <picture>
+              {bannerImg.startsWith("http") && !bannerImg.endsWith(".webp") && (
+                <source
+                  type="image/webp"
+                  srcSet={bannerImg.replace(/\.(png|jpe?g)($|\?)/i, ".webp$2")}
+                />
+              )}
+              <img
+                src={bannerImg}
+                alt={currentPromo.name || "Promotion Banner"}
+                loading="eager"
+                fetchPriority="high"
+                fetchpriority="high"
+                decoding="async"
+                className="w-full h-auto block select-none transform scale-100 group-hover:scale-[1.015] transition-transform duration-700 ease-out"
+              />
+            </picture>
             {/* Soft gradient scrim at top-left to ensure badges pop cleanly over any background image */}
             <div className="absolute inset-0 bg-gradient-to-br from-black/45 via-black/10 to-transparent pointer-events-none" />
           </div>
