@@ -576,10 +576,14 @@ function generateKhqrPayload(orderNumber, amount, currency = "USD") {
   const merchantName = "SOKHENG LY";
   const merchantCity = "PHNOM PENH";
   const currencyCode = currency === "KHR" ? "116" : "840";
-  const amountStr =
-    currency === "KHR"
-      ? String(Math.round(Number(amount)))
-      : Number(amount).toFixed(2);
+  const numAmount = Number(amount || 0);
+  let amountStr;
+  if (currency === "KHR") {
+    amountStr = String(Math.round(numAmount));
+  } else {
+    const rounded = Number(numAmount.toFixed(2));
+    amountStr = Number.isInteger(rounded) ? String(Math.trunc(rounded)) : rounded.toFixed(2);
+  }
   const nowMs = Date.now();
   const expMs = nowMs + 30 * 60 * 1000;
 
@@ -607,7 +611,7 @@ function generateKhqrPayload(orderNumber, amount, currency = "USD") {
 }
 
 let bakongToken =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiYTY5Zjg2M2M2NDc3NDUwMSJ9LCJpYXQiOjE3OTEyNjA2NDQsImV4cCI6MTc5OTAzNjY0NH0.GndKwmJb4Fk7WkmZuUMosfx_7ijcdV8mpuXDxAjrWkM";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiYTY5Zjg2M2M2NDc3NDUwMSJ9LCJpYXQiOjE3OTEyNjU3OTksImV4cCI6MTc5OTA0MTc5OX0.mjU4Mc5ON7tg1C-kKuDC5TVSftBR66XooPEFdGJo840";
 
 function parseJwtClaims(token) {
   try {
@@ -672,9 +676,9 @@ async function checkBakongMd5(md5Hash, env) {
   const apiPrefix = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
   const reqHeaders = {
     "Content-Type": "application/json",
-    Accept: "application/json, text/plain, */*",
-    "User-Agent": "bakong-khqr/0.6.5 (+https://github.com/bsthen/bakong-khqr)",
     Authorization: `Bearer ${activeToken}`,
+    "X-Device-Id": "protech-django-payments",
+    "X-Request-Id": crypto.randomUUID(),
   };
   try {
     let resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
@@ -696,7 +700,7 @@ async function checkBakongMd5(md5Hash, env) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "User-Agent": reqHeaders["User-Agent"],
+          "X-Device-Id": "protech-django-payments",
         },
         body: JSON.stringify({ email: env?.BAKONG_EMAIL || "hengly9723@gmail.com" }),
       });
@@ -704,6 +708,7 @@ async function checkBakongMd5(md5Hash, env) {
       if (renewData?.data?.token) {
         bakongToken = renewData.data.token;
         reqHeaders.Authorization = `Bearer ${bakongToken}`;
+        reqHeaders["X-Request-Id"] = crypto.randomUUID();
         resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
           method: "POST",
           headers: reqHeaders,
@@ -724,6 +729,24 @@ async function checkBakongMd5(md5Hash, env) {
     const responseCode = data?.responseCode ?? null;
     const bakongErrorCode = data?.errorCode ?? null;
     const responseMessage = data?.responseMessage || data?.errorMessage || "";
+
+    if (bakongErrorCode === 17) {
+      const msg =
+        responseMessage ||
+        "Daily request limit of 100 exceeded on Bakong Open API. Please try again tomorrow.";
+      console.error(`[Bakong DAILY LIMIT 17] md5=${md5Hash}: ${msg}`);
+      return {
+        paid: false,
+        gateway_error: true,
+        http_status: resp.status,
+        response_code: responseCode,
+        bakong_error_code: bakongErrorCode,
+        error_code: "BAKONG_DAILY_LIMIT_EXCEEDED",
+        error_message: msg,
+        token_source: tokenSource,
+        raw: data,
+      };
+    }
 
     if (resp.status === 401 || bakongErrorCode === 6) {
       const msg =
