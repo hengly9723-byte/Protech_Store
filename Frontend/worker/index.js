@@ -607,10 +607,63 @@ function generateKhqrPayload(orderNumber, amount, currency = "USD") {
 }
 
 let bakongToken =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiYTY5Zjg2M2M2NDc3NDUwMSJ9LCJpYXQiOjE3ODc0MTc2NzcsImV4cCI6MTc5NTE5MzY3N30.UR9za6IwFsygrM2qtmb6uQWU1YvkQ1BX6kQUfOPN1rQ";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiYTY5Zjg2M2M2NDc3NDUwMSJ9LCJpYXQiOjE3OTEyNjA2NDQsImV4cCI6MTc5OTAzNjY0NH0.GndKwmJb4Fk7WkmZuUMosfx_7ijcdV8mpuXDxAjrWkM";
+
+function parseJwtClaims(token) {
+  try {
+    const parts = String(token || "").split(".");
+    if (parts.length !== 3) return null;
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function selectActiveBakongToken(env) {
+  const envTok = String(env?.BAKONG_TOKEN || "").trim();
+  const fallbackTok = String(bakongToken || "").trim();
+  if (!envTok) return { token: fallbackTok, source: "worker_fallback" };
+  if (envTok.startsWith("rbk")) return { token: envTok, source: "env.BAKONG_TOKEN(relay)" };
+  if (!fallbackTok) return { token: envTok, source: "env.BAKONG_TOKEN" };
+
+  const envClaims = parseJwtClaims(envTok);
+  const fbClaims = parseJwtClaims(fallbackTok);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const envExpired = envClaims?.exp && envClaims.exp <= nowSec;
+  const fbExpired = fbClaims?.exp && fbClaims.exp <= nowSec;
+
+  if (envExpired && !fbExpired) {
+    console.warn(
+      `[Bakong] env.BAKONG_TOKEN is expired (exp=${envClaims.exp}); falling back to newer worker token (iat=${fbClaims?.iat}).`
+    );
+    return { token: fallbackTok, source: "worker_fallback(newer)" };
+  }
+  if ((fbClaims?.iat || 0) > (envClaims?.iat || 0)) {
+    console.warn(
+      `[Bakong] env.BAKONG_TOKEN has older iat (${envClaims?.iat}) than worker token (${fbClaims?.iat}); using newer token.`
+    );
+    return { token: fallbackTok, source: "worker_fallback(newer_iat)" };
+  }
+  return { token: envTok, source: "env.BAKONG_TOKEN" };
+}
 
 async function checkBakongMd5(md5Hash, env) {
-  const activeToken = (env?.BAKONG_TOKEN || bakongToken || "").trim();
+  const { token: activeToken, source: tokenSource } = selectActiveBakongToken(env);
+  if (!activeToken) {
+    console.error("[Bakong] Missing BAKONG_TOKEN in both env and fallback.");
+    return {
+      paid: false,
+      gateway_error: true,
+      http_status: null,
+      response_code: null,
+      bakong_error_code: null,
+      error_code: "BAKONG_TOKEN_MISSING",
+      error_message: "BAKONG_TOKEN is missing. Configure secret via `npx wrangler secret put BAKONG_TOKEN`.",
+      token_source: tokenSource,
+    };
+  }
   const isRelay = activeToken.startsWith("rbk");
   const baseUrl = (
     env?.BAKONG_BASE_URL ||
@@ -631,7 +684,14 @@ async function checkBakongMd5(md5Hash, env) {
     });
     let rawText = await resp.text();
     let data = safeJsonParse(rawText, {});
+    console.log(
+      `[Bakong check_transaction_by_md5] md5=${md5Hash} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"} token_source=${tokenSource}`
+    );
+
     if (!isRelay && (resp.status === 401 || data?.errorCode === 6)) {
+      console.warn(
+        `[Bakong] Token rejected (HTTP ${resp.status}, errorCode=${data?.errorCode}); attempting /v1/renew_token...`
+      );
       const renewResp = await fetch(`${apiPrefix}/renew_token`, {
         method: "POST",
         headers: {
@@ -651,27 +711,123 @@ async function checkBakongMd5(md5Hash, env) {
         });
         rawText = await resp.text();
         data = safeJsonParse(rawText, {});
+        console.log(
+          `[Bakong check_transaction_by_md5 retry] md5=${md5Hash} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"}`
+        );
+      } else {
+        console.error(
+          `[Bakong renew_token failed] status=${renewResp.status} body=${JSON.stringify(renewData)}`
+        );
       }
     }
+
+    const responseCode = data?.responseCode ?? null;
+    const bakongErrorCode = data?.errorCode ?? null;
+    const responseMessage = data?.responseMessage || data?.errorMessage || "";
+
+    if (resp.status === 401 || bakongErrorCode === 6) {
+      const msg =
+        responseMessage ||
+        `Bakong API rejected Authorization Bearer token (HTTP ${resp.status}, errorCode=${bakongErrorCode}).`;
+      console.error(`[Bakong AUTH ERROR] md5=${md5Hash}: ${msg}`);
+      return {
+        paid: false,
+        gateway_error: true,
+        http_status: resp.status,
+        response_code: responseCode,
+        bakong_error_code: bakongErrorCode,
+        error_code: "BAKONG_UNAUTHORIZED",
+        error_message: msg,
+        token_source: tokenSource,
+        raw: data,
+        raw_text: rawText.slice(0, 400),
+      };
+    }
+
+    if (resp.status === 403) {
+      const isCloudFront = rawText.includes("CloudFront") || rawText.includes("403 ERROR");
+      const msg = isCloudFront
+        ? "Bakong API returned HTTP 403 Forbidden (Amazon CloudFront blocked outbound Cloudflare Worker IP due to Cambodia geo-restriction)."
+        : responseMessage || "Bakong API returned HTTP 403 Forbidden.";
+      console.error(`[Bakong 403 FORBIDDEN] md5=${md5Hash}: ${msg}`);
+      return {
+        paid: false,
+        gateway_error: true,
+        http_status: resp.status,
+        response_code: responseCode,
+        bakong_error_code: bakongErrorCode,
+        error_code: isCloudFront ? "BAKONG_CLOUDFRONT_GEO_BLOCKED" : "BAKONG_FORBIDDEN",
+        error_message: msg,
+        token_source: tokenSource,
+        raw: data,
+        raw_text: rawText.slice(0, 400),
+      };
+    }
+
+    if (resp.status === 429 || resp.status >= 400) {
+      const msg =
+        responseMessage || `Bakong API returned HTTP ${resp.status}: ${rawText.slice(0, 200)}`;
+      console.error(`[Bakong HTTP ${resp.status}] md5=${md5Hash}: ${msg}`);
+      return {
+        paid: false,
+        gateway_error: true,
+        http_status: resp.status,
+        response_code: responseCode,
+        bakong_error_code: bakongErrorCode,
+        error_code: resp.status === 429 ? "BAKONG_RATE_LIMITED" : `BAKONG_HTTP_${resp.status}`,
+        error_message: msg,
+        token_source: tokenSource,
+        raw: data,
+        raw_text: rawText.slice(0, 400),
+      };
+    }
+
     const statusStr = String(
       data?.data?.status || data?.status || ""
     ).toUpperCase();
     const paid =
       statusStr === "PAID" ||
-      (data?.responseCode === 0 &&
+      (responseCode === 0 &&
         Boolean(data?.data) &&
         statusStr !== "UNPAID" &&
         statusStr !== "SCANNED" &&
         statusStr !== "EXPIRED");
+    const failed = bakongErrorCode === 3 || statusStr === "FAILED";
+    const notFound = bakongErrorCode === 1;
+
     return {
       paid,
+      failed,
+      not_found: notFound,
+      gateway_error: false,
       http_status: resp.status,
-      response_code: data?.responseCode ?? null,
+      response_code: responseCode,
+      bakong_error_code: bakongErrorCode,
+      error_code: paid
+        ? null
+        : failed
+        ? "TRANSACTION_FAILED"
+        : notFound
+        ? "TRANSACTION_NOT_FOUND"
+        : bakongErrorCode
+        ? `BAKONG_ERROR_${bakongErrorCode}`
+        : null,
+      error_message: paid ? null : responseMessage || null,
+      token_source: tokenSource,
       raw: data,
-      raw_text: resp.status >= 400 ? rawText.slice(0, 300) : undefined,
     };
   } catch (e) {
-    return { paid: false, http_status: null, response_code: null, error: String(e) };
+    console.error(`[Bakong check_transaction_by_md5 exception] md5=${md5Hash}:`, e);
+    return {
+      paid: false,
+      gateway_error: true,
+      http_status: null,
+      response_code: null,
+      bakong_error_code: null,
+      error_code: "BAKONG_NETWORK_ERROR",
+      error_message: String(e),
+      token_source: tokenSource,
+    };
   }
 }
 
@@ -4191,34 +4347,63 @@ export default {
 
       const amount = body.amount ?? ord.total;
       const currency = body.currency || ord.currency || "USD";
-      const gen = generateKhqrPayload(ord.order_number, amount, currency);
-      const now = new Date().toISOString();
-      const gwResp = JSON.stringify({ qr: gen.qr, deep_link: null });
-
       const existingPending = await db
         .prepare(
-          "SELECT id FROM payments WHERE order_id = ? AND gateway = 'bakong_khqr' AND status = 'pending' LIMIT 1"
+          "SELECT * FROM payments WHERE order_id = ? AND gateway = 'bakong_khqr' AND status = 'pending' LIMIT 1"
         )
         .bind(ord.id)
         .first();
 
+      const nowSec = Math.floor(Date.now() / 1000);
+      const prevGw = safeJsonParse(existingPending?.gateway_response, {});
+      const canReuseExisting =
+        existingPending &&
+        !body.force_new &&
+        existingPending.transaction_id &&
+        prevGw?.qr &&
+        Number(existingPending.amount) === Number(amount) &&
+        String(existingPending.currency || "USD") === String(currency) &&
+        (!prevGw.expires_at || Number(prevGw.expires_at) > nowSec + 60);
+
+      let gen;
       let paymentId = existingPending?.id;
-      if (paymentId) {
-        await db
-          .prepare(
-            "UPDATE payments SET transaction_id = ?, amount = ?, currency = ?, gateway_response = ?, updated_at = ? WHERE id = ?"
-          )
-          .bind(gen.md5, String(amount), currency, gwResp, now, paymentId)
-          .run();
+      if (canReuseExisting) {
+        gen = {
+          qr: prevGw.qr,
+          md5: existingPending.transaction_id,
+          expires_at: Number(prevGw.expires_at) || nowSec + 1800,
+        };
       } else {
-        paymentId = crypto.randomUUID();
-        await db
-          .prepare(
-            `INSERT INTO payments (id, order_id, gateway, transaction_id, amount, currency, status, gateway_response, created_at, updated_at)
-             VALUES (?, ?, 'bakong_khqr', ?, ?, ?, 'pending', ?, ?, ?)`
-          )
-          .bind(paymentId, ord.id, gen.md5, String(amount), currency, gwResp, now, now)
-          .run();
+        gen = generateKhqrPayload(ord.order_number, amount, currency);
+        const now = new Date().toISOString();
+        const prevMd5s = Array.isArray(prevGw?.previous_md5s) ? prevGw.previous_md5s : [];
+        if (existingPending?.transaction_id && !prevMd5s.includes(existingPending.transaction_id)) {
+          prevMd5s.push(existingPending.transaction_id);
+        }
+        const gwResp = JSON.stringify({
+          qr: gen.qr,
+          deep_link: null,
+          expires_at: gen.expires_at,
+          previous_md5s: prevMd5s.slice(-10),
+        });
+
+        if (paymentId) {
+          await db
+            .prepare(
+              "UPDATE payments SET transaction_id = ?, amount = ?, currency = ?, gateway_response = ?, updated_at = ? WHERE id = ?"
+            )
+            .bind(gen.md5, String(amount), currency, gwResp, now, paymentId)
+            .run();
+        } else {
+          paymentId = crypto.randomUUID();
+          await db
+            .prepare(
+              `INSERT INTO payments (id, order_id, gateway, transaction_id, amount, currency, status, gateway_response, created_at, updated_at)
+               VALUES (?, ?, 'bakong_khqr', ?, ?, ?, 'pending', ?, ?, ?)`
+            )
+            .bind(paymentId, ord.id, gen.md5, String(amount), currency, gwResp, now, now)
+            .run();
+        }
       }
 
       const [freshOrd] = await getOrdersHydrated(db, { orderIdOrNumber: ord.id });
@@ -4237,10 +4422,16 @@ export default {
       const md5Hash = url.searchParams.get("md5");
       const forceDebug = url.searchParams.get("debug_bakong") === "1";
       const confirmPaid = url.searchParams.get("confirm") === "1";
-      const payRow = await db
+      let payRow = await db
         .prepare("SELECT * FROM payments WHERE transaction_id = ? LIMIT 1")
         .bind(md5Hash)
         .first();
+      if (!payRow && md5Hash) {
+        payRow = await db
+          .prepare("SELECT * FROM payments WHERE gateway_response LIKE ? LIMIT 1")
+          .bind(`%${md5Hash}%`)
+          .first();
+      }
       let alreadyPaid = payRow?.status === "paid";
       if (!alreadyPaid && payRow?.order_id) {
         const ordRow = await db
@@ -4251,7 +4442,7 @@ export default {
       }
       const res =
         confirmPaid || (alreadyPaid && !forceDebug)
-          ? { paid: true, http_status: 200 }
+          ? { paid: true, http_status: 200, response_code: 0, gateway_error: false }
           : await checkBakongMd5(md5Hash, env);
       const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
       const now = new Date().toISOString();
@@ -4274,8 +4465,20 @@ export default {
         : [];
       return jsonResponse({
         paid: isPaid,
-        status: isPaid ? "SUCCESS" : "PENDING",
+        status: isPaid
+          ? "SUCCESS"
+          : res.failed
+          ? "FAILED"
+          : res.gateway_error
+          ? "GATEWAY_ERROR"
+          : "PENDING",
+        error: res.gateway_error || res.failed ? res.error_message : null,
+        error_code: res.error_code ?? null,
         bakong_http_status: res.http_status ?? null,
+        bakong_response_code: res.response_code ?? null,
+        bakong_error_code: res.bakong_error_code ?? null,
+        bakong_message: res.error_message ?? null,
+        token_source: res.token_source ?? null,
         bakong_raw: forceDebug ? res : undefined,
         order: ord || null,
       });
@@ -4295,7 +4498,7 @@ export default {
       const alreadyPaid = ord?.payment_status === "paid";
       const res =
         alreadyPaid || confirmPaid
-          ? { paid: true, http_status: 200 }
+          ? { paid: true, http_status: 200, response_code: 0, gateway_error: false }
           : await checkBakongMd5(md5Hash, env);
       const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
       if (isPaid && ord && !alreadyPaid) {
@@ -4316,8 +4519,20 @@ export default {
       const [freshOrd] = ord ? await getOrdersHydrated(db, { orderIdOrNumber: ord.id }) : [];
       return jsonResponse({
         paid: isPaid,
-        status: isPaid ? "SUCCESS" : "PENDING",
+        status: isPaid
+          ? "SUCCESS"
+          : res.failed
+          ? "FAILED"
+          : res.gateway_error
+          ? "GATEWAY_ERROR"
+          : "PENDING",
+        error: res.gateway_error || res.failed ? res.error_message : null,
+        error_code: res.error_code ?? null,
         bakong_http_status: res.http_status ?? null,
+        bakong_response_code: res.response_code ?? null,
+        bakong_error_code: res.bakong_error_code ?? null,
+        bakong_message: res.error_message ?? null,
+        token_source: res.token_source ?? null,
         order: freshOrd || null,
       });
     }
