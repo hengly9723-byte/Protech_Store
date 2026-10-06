@@ -9,6 +9,7 @@ const LoginPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const from = location.state?.from?.pathname || "/profile";
+  const isVerifiedRedirect = new URLSearchParams(location.search).get("verified") === "true";
 
   const [formData, setFormData] = useState({ email: "", password: "" });
   const [showPassword, setShowPassword] = useState(false);
@@ -65,6 +66,19 @@ const LoginPage = () => {
           <h1 className="text-2xl font-black text-gray-900 tracking-tight">Welcome Back</h1>
           <p className="text-sm text-gray-500 mt-1">Sign in to your Protech account</p>
         </div>
+
+        {/* Email Verified Banner */}
+        {isVerifiedRedirect && !error && !authError && (
+          <div className="mb-6 p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm flex items-start gap-3">
+            <i className="bi bi-check-circle-fill text-lg shrink-0 text-emerald-500 mt-0.5" />
+            <div>
+              <p className="font-semibold text-xs uppercase tracking-wide">Email Verified</p>
+              <p className="mt-0.5 text-xs">
+                Your email address has been verified! You can now sign in to your account.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Error Alert */}
         {(error || authError) && (

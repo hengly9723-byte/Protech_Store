@@ -21,7 +21,10 @@ const INIT_SQL_STATEMENTS = [
     is_active INTEGER NOT NULL DEFAULT 1,
     is_staff INTEGER NOT NULL DEFAULT 0,
     is_superuser INTEGER NOT NULL DEFAULT 0,
-    is_email_verified INTEGER NOT NULL DEFAULT 1,
+    is_verified INTEGER NOT NULL DEFAULT 0,
+    verification_token TEXT,
+    token_expires_at INTEGER,
+    is_email_verified INTEGER NOT NULL DEFAULT 0,
     email_verified_at TEXT,
     email_verification_token TEXT,
     password_reset_token TEXT,
@@ -443,6 +446,29 @@ async function ensureD1(db) {
         ),
       ]);
     }
+    const emailVerifColsCheck = await db
+      .prepare("SELECT value FROM _d1_meta WHERE key = 'email_verification_cols_20261006'")
+      .first();
+    if (!emailVerifColsCheck) {
+      const alterStmts = [
+        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN verification_token TEXT",
+        "ALTER TABLE users ADD COLUMN token_expires_at INTEGER",
+      ];
+      for (const s of alterStmts) {
+        try {
+          await db.prepare(s).run();
+        } catch (_) {}
+      }
+      await db.batch([
+        db.prepare(
+          "UPDATE users SET is_verified = 1 WHERE status IN ('active', 'ACTIVE') OR is_email_verified = 1"
+        ),
+        db.prepare(
+          "INSERT OR REPLACE INTO _d1_meta (key, value) VALUES ('email_verification_cols_20261006', datetime('now'))"
+        ),
+      ]);
+    }
     schemaInitialized = true;
   } catch (err) {
     console.error("D1 schema init error:", err);
@@ -654,6 +680,7 @@ async function checkBakongMd5(md5Hash, env) {
 // ==========================================
 function formatUserRow(u) {
   if (!u) return null;
+  const verified = Boolean(u.is_verified ?? u.is_email_verified);
   return {
     id: u.id,
     email: u.email,
@@ -671,12 +698,113 @@ function formatUserRow(u) {
     is_active: Boolean(u.is_active),
     is_staff: Boolean(u.is_staff),
     is_superuser: Boolean(u.is_superuser),
-    is_email_verified: Boolean(u.is_email_verified),
+    is_verified: verified,
+    is_email_verified: verified,
     permissions: [],
     last_login_at: u.last_login_at || null,
     created_at: u.created_at,
     updated_at: u.updated_at,
   };
+}
+
+async function hashPassword(password, salt = crypto.randomUUID()) {
+  const data = new TextEncoder().encode(`${salt}:${password}`);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashHex = Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `sha256$${salt}$${hashHex}`;
+}
+
+async function verifyPassword(password, storedHash) {
+  if (!storedHash || !password) return false;
+  if (storedHash.startsWith("sha256$")) {
+    const parts = storedHash.split("$");
+    const salt = parts[1] || "";
+    const computed = await hashPassword(password, salt);
+    return computed === storedHash;
+  }
+  return storedHash === password;
+}
+
+async function sendTransactionalEmail(env, { to, subject, text, html }) {
+  let resendError = null;
+  if (env.RESEND_API_KEY) {
+    try {
+      const resendRes = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: env.DEFAULT_FROM_EMAIL || "Protech Store <onboarding@resend.dev>",
+          to: [to],
+          subject,
+          text,
+          html,
+        }),
+      });
+      if (resendRes.ok) {
+        return;
+      }
+      resendError = await resendRes.text();
+    } catch (e) {
+      resendError = e.message || String(e);
+    }
+  }
+
+  const smtpHost = env.EMAIL_HOST || "smtp.gmail.com";
+  const smtpUser = env.EMAIL_HOST_USER || "hengly9723@gmail.com";
+  const smtpPassword = env.EMAIL_HOST_PASSWORD || "acyuzizkjdtrtksq";
+
+  try {
+    await WorkerMailer.send(
+      {
+        host: smtpHost,
+        port: Number(env.EMAIL_PORT || 587),
+        secure: false,
+        startTls: true,
+        authType: ["plain", "login"],
+        credentials: {
+          username: smtpUser,
+          password: smtpPassword,
+        },
+      },
+      {
+        from: { name: "Protech Store", email: smtpUser },
+        to,
+        subject,
+        text,
+        html,
+      }
+    );
+  } catch (_) {
+    try {
+      await WorkerMailer.send(
+        {
+          host: smtpHost,
+          port: 465,
+          secure: true,
+          startTls: false,
+          authType: ["plain", "login"],
+          credentials: {
+            username: smtpUser,
+            password: smtpPassword,
+          },
+        },
+        {
+          from: { name: "Protech Store", email: smtpUser },
+          to,
+          subject,
+          text,
+          html,
+        }
+      );
+    } catch (smtpErr) {
+      throw new Error(resendError ? `Resend: ${resendError}; SMTP: ${smtpErr.message}` : smtpErr.message);
+    }
+  }
 }
 
 function makeTokens(user) {
@@ -1412,41 +1540,79 @@ export default {
     }
 
     // --- AUTH & USERS ---
-    if (apiPath === "auth/login" && method === "POST") {
+    if ((apiPath === "auth/login" || apiPath === "login") && method === "POST") {
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
+      if (!email || !password) {
+        return jsonResponse({ error: "Email and password are required." }, 400);
+      }
       let row = await db
         .prepare("SELECT * FROM users WHERE lower(email) = ?")
         .bind(email)
         .first();
-      if (!row && email) {
+      if (!row && email === "hengly9723@gmail.com") {
         const id = crypto.randomUUID();
-        const isAdmin = email === "hengly9723@gmail.com" ? 1 : 0;
         const now = new Date().toISOString();
+        const passHash = await hashPassword(password);
         await db
           .prepare(
-            `INSERT INTO users (id, email, password_hash, full_name, role, status, is_active, is_staff, is_superuser, is_email_verified, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, 1, ?, ?)`
+            `INSERT INTO users (
+              id, email, password_hash, full_name, role, status,
+              is_active, is_staff, is_superuser, is_verified, is_email_verified,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'admin', 'ACTIVE', 1, 1, 1, 1, 1, ?, ?)`
           )
-          .bind(id, email, password, email.split("@")[0], isAdmin ? "admin" : "user", isAdmin, isAdmin, now, now)
+          .bind(id, email, passHash, email.split("@")[0], now, now)
           .run();
         row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
       }
       if (!row) {
         return jsonResponse({ error: "Invalid email or password." }, 401);
       }
-      const now = new Date().toISOString();
-      if (password && (!row.password_hash || row.password_hash === "pbkdf2_sha256$admin")) {
-        await db
-          .prepare("UPDATE users SET password_hash = ?, last_login_at = ?, updated_at = ? WHERE id = ?")
-          .bind(password, now, now, row.id)
-          .run();
-      } else {
-        await db
-          .prepare("UPDATE users SET last_login_at = ? WHERE id = ?")
-          .bind(now, row.id)
-          .run();
+
+      if (!row.password_hash) {
+        return jsonResponse(
+          {
+            error:
+              "This account was created with Google. Please sign in with Google or set a password on the Sign Up page.",
+          },
+          400
+        );
       }
+
+      const now = new Date().toISOString();
+      if (row.password_hash === "pbkdf2_sha256$admin") {
+        const passHash = await hashPassword(password);
+        await db
+          .prepare(
+            "UPDATE users SET password_hash = ?, is_verified = 1, is_email_verified = 1, last_login_at = ?, updated_at = ? WHERE id = ?"
+          )
+          .bind(passHash, now, now, row.id)
+          .run();
+        row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(row.id).first();
+      } else {
+        const isValidPass = await verifyPassword(password, row.password_hash);
+        if (!isValidPass) {
+          return jsonResponse({ error: "Invalid email or password." }, 401);
+        }
+      }
+
+      // Sign-in Guard: Check if email is verified
+      if (
+        Number(row.is_verified ?? row.is_email_verified ?? 1) === 0 ||
+        String(row.status || "").toUpperCase() === "PENDING"
+      ) {
+        return jsonResponse(
+          { error: "Please verify your email address before logging in." },
+          403
+        );
+      }
+
+      await db
+        .prepare("UPDATE users SET last_login_at = ? WHERE id = ?")
+        .bind(now, row.id)
+        .run();
+
       const formatted = formatUserRow(row);
       const tokens = makeTokens(formatted);
       return jsonResponse({
@@ -1474,16 +1640,47 @@ export default {
         const id = crypto.randomUUID();
         await db
           .prepare(
-            `INSERT INTO users (id, email, full_name, avatar_url, role, status, is_active, is_staff, is_superuser, is_email_verified, last_login_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, 1, ?, ?, ?)`
+            `INSERT INTO users (
+              id, email, full_name, avatar_url, role, status,
+              is_active, is_staff, is_superuser,
+              is_verified, verification_token, token_expires_at,
+              is_email_verified, email_verified_at,
+              last_login_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, 1, NULL, NULL, 1, ?, ?, ?, ?)`
           )
-          .bind(id, email, name, picture, isAdmin ? "admin" : "user", isAdmin, isAdmin, now, now, now)
+          .bind(
+            id,
+            email,
+            name,
+            picture,
+            isAdmin ? "admin" : "user",
+            isAdmin,
+            isAdmin,
+            now,
+            now,
+            now,
+            now
+          )
           .run();
         row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
       } else {
         await db
-          .prepare("UPDATE users SET last_login_at = ?, avatar_url = COALESCE(?, avatar_url) WHERE id = ?")
-          .bind(now, picture, row.id)
+          .prepare(
+            `UPDATE users SET
+               last_login_at = ?,
+               avatar_url = COALESCE(?, avatar_url),
+               is_verified = 1,
+               is_email_verified = 1,
+               email_verified_at = COALESCE(email_verified_at, ?),
+               status = 'ACTIVE',
+               is_active = 1,
+               verification_token = NULL,
+               token_expires_at = NULL,
+               email_verification_token = NULL,
+               updated_at = ?
+             WHERE id = ?`
+          )
+          .bind(now, picture, now, now, row.id)
           .run();
         row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(row.id).first();
       }
@@ -1497,71 +1694,220 @@ export default {
       });
     }
 
-    if (apiPath === "auth/register" && method === "POST") {
+    if ((apiPath === "auth/register" || apiPath === "register") && method === "POST") {
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
-      if (!email) return jsonResponse({ error: "Email is required." }, 400);
+      if (!email || !password) {
+        return jsonResponse({ error: "Email and password are required." }, 400);
+      }
       const fullName =
         body.full_name ||
         [body.first_name, body.last_name].filter(Boolean).join(" ") ||
         email.split("@")[0];
       const now = new Date().toISOString();
+      const passHash = await hashPassword(password);
+      const verificationToken = crypto.randomUUID();
+      const tokenExpiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours in ms
 
       const existing = await db
         .prepare("SELECT * FROM users WHERE lower(email) = ?")
         .bind(email)
         .first();
+
+      let userId = existing?.id;
+
       if (existing) {
-        // Allow claiming/setting password on the pre-seeded admin account or unactivated account
+        const alreadyVerified =
+          Number(existing.is_verified ?? existing.is_email_verified ?? 0) === 1 &&
+          String(existing.status || "").toUpperCase() !== "PENDING";
+
+        // If user already exists and is verified with a usable password, reject duplicate registration
         if (
-          email === "hengly9723@gmail.com" ||
-          !existing.password_hash ||
-          existing.password_hash === "pbkdf2_sha256$admin"
+          alreadyVerified &&
+          existing.password_hash &&
+          existing.password_hash !== "pbkdf2_sha256$admin"
         ) {
-          await db
-            .prepare(
-              `UPDATE users SET
-                 password_hash = ?,
-                 full_name = COALESCE(NULLIF(?, ''), full_name),
-                 last_login_at = ?,
-                 updated_at = ?
-               WHERE id = ?`
-            )
-            .bind(password, fullName, now, now, existing.id)
-            .run();
-          const updatedRow = await db.prepare("SELECT * FROM users WHERE id = ?").bind(existing.id).first();
-          const formatted = formatUserRow(updatedRow);
-          const tokens = makeTokens(formatted);
-          return jsonResponse({ message: "Registration successful!", user: formatted, tokens, ...tokens }, 201);
+          return jsonResponse(
+            { error: "User with this email already exists. Please sign in instead." },
+            400
+          );
         }
-        return jsonResponse({ error: "User with this email already exists. Please sign in instead." }, 400);
+
+        // Update unverified or passwordless account with new verification token & hashed password
+        await db
+          .prepare(
+            `UPDATE users SET
+               password_hash = ?,
+               full_name = COALESCE(NULLIF(?, ''), full_name),
+               status = 'PENDING',
+               is_active = 0,
+               is_verified = 0,
+               is_email_verified = 0,
+               verification_token = ?,
+               token_expires_at = ?,
+               email_verification_token = ?,
+               updated_at = ?
+             WHERE id = ?`
+          )
+          .bind(
+            passHash,
+            fullName,
+            verificationToken,
+            tokenExpiresAt,
+            verificationToken,
+            now,
+            existing.id
+          )
+          .run();
+      } else {
+        userId = crypto.randomUUID();
+        const isAdmin = email === "hengly9723@gmail.com" ? 1 : 0;
+        await db
+          .prepare(
+            `INSERT INTO users (
+              id, email, password_hash, full_name, first_name, last_name,
+              role, status, is_active, is_staff, is_superuser,
+              is_verified, verification_token, token_expires_at,
+              is_email_verified, email_verification_token,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, 0, ?, ?, 0, ?, ?, ?)`
+          )
+          .bind(
+            userId,
+            email,
+            passHash,
+            fullName,
+            body.first_name || "",
+            body.last_name || "",
+            isAdmin ? "admin" : "user",
+            isAdmin,
+            isAdmin,
+            verificationToken,
+            tokenExpiresAt,
+            verificationToken,
+            now,
+            now
+          )
+          .run();
       }
-      const id = crypto.randomUUID();
-      const isAdmin = email === "hengly9723@gmail.com" ? 1 : 0;
+
+      const frontendUrl = (env.FRONTEND_URL || url.origin).replace(/\/+$/, "");
+      const verifyUrl = `${frontendUrl}/api/verify-email?token=${encodeURIComponent(verificationToken)}`;
+      const subject = "Verify your email address - Protech Store";
+      const textBody =
+        `Welcome to Protech Store, ${fullName}!\n\n` +
+        `Please verify your email address by clicking the link below:\n` +
+        `${verifyUrl}\n\n` +
+        `Your verification token: ${verificationToken}\n\n` +
+        `This link will expire in 24 hours.`;
+      const htmlBody = `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; border: 1px solid #e5e7eb; border-radius: 16px; color: #111827;">
+          <h2 style="margin: 0 0 12px; font-size: 20px; font-weight: 800;">Verify Your Email Address</h2>
+          <p style="margin: 0 0 16px; font-size: 14px; color: #4b5563; line-height: 1.6;">
+            Hello <strong>${fullName}</strong>, thank you for registering at Protech Store! Please confirm your email address by clicking the button below.
+          </p>
+          <p style="margin: 24px 0;">
+            <a href="${verifyUrl}" style="display: inline-block; padding: 12px 24px; background: #111827; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 14px; border-radius: 10px;">
+              Verify Email Address
+            </a>
+          </p>
+          <div style="margin: 20px 0; padding: 14px 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px;">
+            <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 6px;">
+              Or copy verification link
+            </div>
+            <div style="font-size: 12px; color: #0284c7; word-break: break-all;">
+              <a href="${verifyUrl}" style="color: #0284c7;">${verifyUrl}</a>
+            </div>
+          </div>
+          <p style="margin: 16px 0 0; font-size: 12px; color: #9ca3af;">
+            This verification link expires in 24 hours.
+          </p>
+        </div>
+      `;
+
+      try {
+        await sendTransactionalEmail(env, {
+          to: email,
+          subject,
+          text: textBody,
+          html: htmlBody,
+        });
+      } catch (mailErr) {
+        console.error("Failed to send verification email:", mailErr);
+        return jsonResponse(
+          {
+            error: `Failed to send verification email: ${mailErr.message || String(mailErr)}`,
+          },
+          500
+        );
+      }
+
+      return jsonResponse(
+        {
+          message:
+            "Registration successful! Please check your email inbox to verify your account before signing in.",
+          requires_verification: true,
+        },
+        201
+      );
+    }
+
+    if (
+      (apiPath === "verify-email" || apiPath === "auth/verify-email") &&
+      (method === "GET" || method === "POST")
+    ) {
+      const token = String(
+        url.searchParams.get("token") || body.token || ""
+      ).trim();
+      if (!token) {
+        return jsonResponse({ error: "Verification token is required." }, 400);
+      }
+
+      const row = await db
+        .prepare(
+          "SELECT * FROM users WHERE verification_token = ? OR email_verification_token = ? LIMIT 1"
+        )
+        .bind(token, token)
+        .first();
+
+      if (!row) {
+        return jsonResponse({ error: "Invalid or expired verification token." }, 400);
+      }
+
+      if (row.token_expires_at && Date.now() > Number(row.token_expires_at)) {
+        return jsonResponse(
+          { error: "Verification token has expired. Please register again to get a new link." },
+          400
+        );
+      }
+
+      const now = new Date().toISOString();
       await db
         .prepare(
-          `INSERT INTO users (id, email, password_hash, full_name, first_name, last_name, role, status, is_active, is_staff, is_superuser, is_email_verified, last_login_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, 1, ?, ?, ?)`
+          `UPDATE users SET
+             is_verified = 1,
+             is_email_verified = 1,
+             email_verified_at = ?,
+             status = 'ACTIVE',
+             is_active = 1,
+             verification_token = NULL,
+             token_expires_at = NULL,
+             email_verification_token = NULL,
+             updated_at = ?
+           WHERE id = ?`
         )
-        .bind(
-          id,
-          email,
-          password,
-          fullName,
-          body.first_name || "",
-          body.last_name || "",
-          isAdmin ? "admin" : "user",
-          isAdmin,
-          isAdmin,
-          now,
-          now,
-          now
-        )
+        .bind(now, now, row.id)
         .run();
-      const row = await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
-      const formatted = formatUserRow(row);
-      const tokens = makeTokens(formatted);
-      return jsonResponse({ message: "Registration successful!", user: formatted, tokens, ...tokens }, 201);
+
+      if (method === "GET") {
+        const frontendUrl = (env.FRONTEND_URL || url.origin).replace(/\/+$/, "");
+        return Response.redirect(`${frontendUrl}/login?verified=true`, 302);
+      }
+
+      return jsonResponse({
+        message: "Email verified successfully! You can now sign in.",
+        verified: true,
+      });
     }
 
     if (apiPath === "auth/request-password-reset" && method === "POST") {
@@ -1613,76 +1959,13 @@ export default {
           </div>
         `;
 
-        const smtpHost = env.EMAIL_HOST || "smtp.gmail.com";
-        const smtpUser = env.EMAIL_HOST_USER || "hengly9723@gmail.com";
-        const smtpPassword = env.EMAIL_HOST_PASSWORD || "acyuzizkjdtrtksq";
-
         try {
-          if (env.RESEND_API_KEY) {
-            const resendRes = await fetch("https://api.resend.com/emails", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${env.RESEND_API_KEY}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                from: env.DEFAULT_FROM_EMAIL || `Protech Store <onboarding@resend.dev>`,
-                to: [row.email],
-                subject,
-                text: textBody,
-                html: htmlBody,
-              }),
-            });
-            if (!resendRes.ok) {
-              const errText = await resendRes.text();
-              throw new Error(`Resend API error: ${errText}`);
-            }
-          } else {
-            try {
-              await WorkerMailer.send(
-                {
-                  host: smtpHost,
-                  port: Number(env.EMAIL_PORT || 587),
-                  secure: false,
-                  startTls: true,
-                  authType: ["plain", "login"],
-                  credentials: {
-                    username: smtpUser,
-                    password: smtpPassword,
-                  },
-                },
-                {
-                  from: { name: "Protech Store", email: smtpUser },
-                  to: row.email,
-                  subject,
-                  text: textBody,
-                  html: htmlBody,
-                }
-              );
-            } catch (err587) {
-              // Fallback to implicit TLS on port 465 if port 587 STARTTLS fails
-              await WorkerMailer.send(
-                {
-                  host: smtpHost,
-                  port: 465,
-                  secure: true,
-                  startTls: false,
-                  authType: ["plain", "login"],
-                  credentials: {
-                    username: smtpUser,
-                    password: smtpPassword,
-                  },
-                },
-                {
-                  from: { name: "Protech Store", email: smtpUser },
-                  to: row.email,
-                  subject,
-                  text: textBody,
-                  html: htmlBody,
-                }
-              );
-            }
-          }
+          await sendTransactionalEmail(env, {
+            to: row.email,
+            subject,
+            text: textBody,
+            html: htmlBody,
+          });
         } catch (mailErr) {
           console.error("Failed to send password reset email:", mailErr);
           return jsonResponse(
@@ -1713,17 +1996,23 @@ export default {
         return jsonResponse({ error: "Invalid or expired reset token." }, 400);
       }
       const now = new Date().toISOString();
+      const passHash = await hashPassword(newPassword);
       await db
         .prepare(
-          "UPDATE users SET password_hash = ?, password_reset_token = NULL, password_reset_expires = NULL, updated_at = ? WHERE id = ?"
+          `UPDATE users SET
+             password_hash = ?,
+             is_verified = 1,
+             is_email_verified = 1,
+             status = 'ACTIVE',
+             is_active = 1,
+             password_reset_token = NULL,
+             password_reset_expires = NULL,
+             updated_at = ?
+           WHERE id = ?`
         )
-        .bind(newPassword, now, row.id)
+        .bind(passHash, now, row.id)
         .run();
       return jsonResponse({ message: "Password has been reset successfully. You can now sign in." });
-    }
-
-    if (apiPath === "auth/verify-email" && method === "POST") {
-      return jsonResponse({ message: "Email verified successfully!" });
     }
 
     if (apiPath === "auth/refresh" && method === "POST") {

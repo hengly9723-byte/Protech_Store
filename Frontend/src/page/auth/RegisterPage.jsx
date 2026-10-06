@@ -18,6 +18,8 @@ const RegisterPage = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [verificationMessage, setVerificationMessage] = useState("");
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -44,7 +46,15 @@ const RegisterPage = () => {
     setIsLoading(false);
 
     if (result.success) {
-      navigate("/profile");
+      if (result.data?.requires_verification || !result.user) {
+        setVerificationSent(true);
+        setVerificationMessage(
+          result.data?.message ||
+            "Registration successful! Please check your email inbox to verify your account."
+        );
+      } else {
+        navigate("/profile");
+      }
     } else {
       setError(result.error);
     }
@@ -63,6 +73,34 @@ const RegisterPage = () => {
       }
     }
   };
+
+  if (verificationSent) {
+    return (
+      <div className="min-h-[80vh] flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-gray-100 p-8 sm:p-10 text-center relative overflow-hidden">
+          <div className="w-16 h-16 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center mx-auto text-3xl mb-4">
+            <i className="bi bi-envelope-check-fill" />
+          </div>
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">Check Your Inbox</h1>
+          <p className="text-sm text-gray-600 mt-2 leading-relaxed">
+            {verificationMessage}
+          </p>
+          <p className="text-xs text-gray-400 mt-3">
+            Sent to <span className="font-semibold text-gray-700">{formData.email}</span>
+          </p>
+          <div className="mt-8 space-y-3">
+            <Link
+              to="/login"
+              className="w-full py-3.5 px-4 rounded-xl bg-button hover:bg-button-hover text-white font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2"
+            >
+              <span>Go to Sign In</span>
+              <i className="bi bi-arrow-right" />
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-[80vh] flex items-center justify-center px-4 py-12">
