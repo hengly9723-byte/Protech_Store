@@ -4418,6 +4418,25 @@ export default {
       });
     }
 
+    if (apiPath === "payments/khqr/pending" && method === "GET") {
+      const { results } = await db
+        .prepare(
+          `SELECT p.id, p.order_id, p.transaction_id, p.amount, p.currency, p.gateway_response, p.updated_at, o.order_number
+           FROM payments p
+           INNER JOIN orders o ON o.id = p.order_id
+           WHERE p.status = 'pending' AND o.payment_status = 'unpaid'
+           ORDER BY p.updated_at DESC
+           LIMIT 15`
+        )
+        .all();
+      return jsonResponse({
+        results: (results || []).map((r) => ({
+          ...r,
+          gateway_response: safeJsonParse(r.gateway_response, {}),
+        })),
+      });
+    }
+
     if (apiPath === "payments/khqr/check-status" && method === "GET") {
       const md5Hash = url.searchParams.get("md5");
       const forceDebug = url.searchParams.get("debug_bakong") === "1";
