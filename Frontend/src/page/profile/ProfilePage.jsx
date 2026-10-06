@@ -329,7 +329,7 @@ const ProfilePage = () => {
                         .toLowerCase();
                       setFormData((prev) => ({
                         ...prev,
-                        avatar_url: `https://unavatar.io/${encodeURIComponent(emailTrimmed)}`,
+                        avatar_url: `https://unavatar.io/${encodeURIComponent(emailTrimmed)}?fallback=https://www.gravatar.com/avatar/?d=identicon`,
                       }));
                     }}
                     className="px-3.5 py-2 text-xs font-bold rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-700 transition-colors whitespace-nowrap cursor-pointer shadow-xs"

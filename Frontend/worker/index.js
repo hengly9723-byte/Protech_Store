@@ -678,9 +678,24 @@ async function checkBakongMd5(md5Hash, env) {
 // ==========================================
 // Token & Auth Helpers
 // ==========================================
+function getDefaultAvatarUrl(email) {
+  const clean = String(email || "").trim().toLowerCase();
+  if (!clean) return null;
+  const emailHash = md5(clean);
+  const fallbackUrl = `https://www.gravatar.com/avatar/${emailHash}?d=identicon`;
+  return `https://unavatar.io/${clean}?fallback=${fallbackUrl}`;
+}
+
 function formatUserRow(u) {
   if (!u) return null;
   const verified = Boolean(u.is_verified ?? u.is_email_verified);
+  let avatarUrl = u.avatar_url || null;
+  if (
+    !avatarUrl ||
+    (avatarUrl.startsWith("https://unavatar.io/") && !avatarUrl.includes("fallback="))
+  ) {
+    avatarUrl = getDefaultAvatarUrl(u.email);
+  }
   return {
     id: u.id,
     email: u.email,
@@ -691,7 +706,7 @@ function formatUserRow(u) {
     first_name: u.first_name || "",
     last_name: u.last_name || "",
     phone: u.phone || "",
-    avatar_url: u.avatar_url || null,
+    avatar_url: avatarUrl,
     role: u.role || (u.is_superuser || u.is_staff ? "admin" : "user"),
     roles: [],
     status: u.status || "active",
@@ -700,6 +715,7 @@ function formatUserRow(u) {
     is_superuser: Boolean(u.is_superuser),
     is_verified: verified,
     is_email_verified: verified,
+    email_verified_at: u.email_verified_at || (verified ? u.created_at : null),
     permissions: [],
     last_login_at: u.last_login_at || null,
     created_at: u.created_at,
@@ -1734,11 +1750,13 @@ export default {
         }
 
         // Update unverified or passwordless account with new verification token & hashed password
+        const defAvatar = getDefaultAvatarUrl(email);
         await db
           .prepare(
             `UPDATE users SET
                password_hash = ?,
                full_name = COALESCE(NULLIF(?, ''), full_name),
+               avatar_url = COALESCE(NULLIF(avatar_url, ''), ?),
                status = 'PENDING',
                is_active = 0,
                is_verified = 0,
@@ -1752,6 +1770,7 @@ export default {
           .bind(
             passHash,
             fullName,
+            defAvatar,
             verificationToken,
             tokenExpiresAt,
             verificationToken,
@@ -1762,15 +1781,16 @@ export default {
       } else {
         userId = crypto.randomUUID();
         const isAdmin = email === "hengly9723@gmail.com" ? 1 : 0;
+        const defAvatar = getDefaultAvatarUrl(email);
         await db
           .prepare(
             `INSERT INTO users (
-              id, email, password_hash, full_name, first_name, last_name,
+              id, email, password_hash, full_name, first_name, last_name, avatar_url,
               role, status, is_active, is_staff, is_superuser,
               is_verified, verification_token, token_expires_at,
               is_email_verified, email_verification_token,
               created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, 0, ?, ?, 0, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, 0, ?, ?, 0, ?, ?, ?)`
           )
           .bind(
             userId,
@@ -1779,6 +1799,7 @@ export default {
             fullName,
             body.first_name || "",
             body.last_name || "",
+            defAvatar,
             isAdmin ? "admin" : "user",
             isAdmin,
             isAdmin,
