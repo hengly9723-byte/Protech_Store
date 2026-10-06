@@ -45,7 +45,7 @@ const checkTransactionByMd5 = async (md5) => {
   try {
     const response = await axios.post(
       `${baseUrl}/v1/check_transaction_by_md5`,
-      { md5 },
+      { md5: String(md5).trim().toLowerCase() },
       {
         headers: {
           'Content-Type': 'application/json',
@@ -187,10 +187,27 @@ app.post('/api/payment/check', async (req, res) => {
       });
     }
 
+    transactionMd5 = String(transactionMd5).trim().toLowerCase();
+
+    // Ensure MD5 hash passed to Bakong API is computed from the exact, raw
+    // KHQR text string rendered on the QR canvas (without extra whitespace/formatting).
+    const targetOrder = orderId
+      ? paymentOrders[orderId]
+      : Object.values(paymentOrders).find((o) => o.md5 === transactionMd5);
+
+    if (targetOrder && targetOrder.qr) {
+      const crypto = require('crypto');
+      transactionMd5 = crypto
+        .createHash('md5')
+        .update(String(targetOrder.qr).trim())
+        .digest('hex')
+        .toLowerCase();
+    }
+
     console.log(`[BACKEND] Checking payment, using MD5: ${transactionMd5}`);
 
     // Call Bakong's check transaction by MD5 endpoint
-    const result = checkTransactionByMd5(transactionMd5);
+    const result = await checkTransactionByMd5(transactionMd5);
 
     console.log('Bakong API Response:', result);
 
@@ -206,21 +223,22 @@ app.post('/api/payment/check', async (req, res) => {
         responseData?.responseMessage ??
         '';
 
-      // If Bakong returns responseCode === 0 AND data exists (Success = paid)
-      // Reference: checkpayment.controller.js:51 — require data.data?.hash presence
-      if (responseCode === 0 && responseData?.data) {
+      // If Bakong returns responseCode === 0 (Success = paid)
+      if (responseCode === 0 || responseCode === '0') {
         // Find the order and update status to PAID with full response data
-        const order = paymentOrders[orderId || ''];
+        const order = paymentOrders[orderId || ''] || targetOrder;
         if (order) {
           order.status = 'PAID';
           order.paidAt = new Date();
-          order.bakongHash = responseData.data.hash;
-          order.fromAccountId = responseData.data.fromAccountId;
-          order.toAccountId = responseData.data.toAccountId;
-          order.currency = responseData.data.currency;
-          order.amount = responseData.data.amount;
-          order.description = responseData.data.description;
-          order.transaction_id = responseData.data.hash;
+          if (responseData.data) {
+            order.bakongHash = responseData.data.hash;
+            order.fromAccountId = responseData.data.fromAccountId;
+            order.toAccountId = responseData.data.toAccountId;
+            order.currency = responseData.data.currency;
+            order.amount = responseData.data.amount;
+            order.description = responseData.data.description;
+            order.transaction_id = responseData.data.hash;
+          }
         }
 
         console.log(
@@ -228,6 +246,7 @@ app.post('/api/payment/check', async (req, res) => {
         );
 
         return res.json({
+          responseCode: 0,
           success: true,
           status: 'PAID',
           paid: true,
@@ -243,6 +262,7 @@ app.post('/api/payment/check', async (req, res) => {
       );
 
       return res.json({
+        responseCode: responseCode ?? 1,
         status: 'PENDING',
         paid: false,
       });
@@ -254,6 +274,7 @@ app.post('/api/payment/check', async (req, res) => {
     );
 
     return res.json({
+      responseCode: 1,
       status: 'PENDING',
       paid: false,
     });

@@ -680,16 +680,17 @@ async function checkBakongMd5(md5Hash, env) {
     "X-Device-Id": "protech-django-payments",
     "X-Request-Id": crypto.randomUUID(),
   };
+  const cleanMd5 = String(md5Hash || "").trim().toLowerCase();
   try {
     let resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
       method: "POST",
       headers: reqHeaders,
-      body: JSON.stringify({ md5: md5Hash }),
+      body: JSON.stringify({ md5: cleanMd5 }),
     });
     let rawText = await resp.text();
     let data = safeJsonParse(rawText, {});
     console.log(
-      `[Bakong check_transaction_by_md5] md5=${md5Hash} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"} token_source=${tokenSource}`
+      `[Bakong check_transaction_by_md5] md5=${cleanMd5} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"} token_source=${tokenSource}`
     );
 
     if (!isRelay && (resp.status === 401 || data?.errorCode === 6)) {
@@ -712,12 +713,12 @@ async function checkBakongMd5(md5Hash, env) {
         resp = await fetch(`${apiPrefix}/check_transaction_by_md5`, {
           method: "POST",
           headers: reqHeaders,
-          body: JSON.stringify({ md5: md5Hash }),
+          body: JSON.stringify({ md5: cleanMd5 }),
         });
         rawText = await resp.text();
         data = safeJsonParse(rawText, {});
         console.log(
-          `[Bakong check_transaction_by_md5 retry] md5=${md5Hash} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"}`
+          `[Bakong check_transaction_by_md5 retry] md5=${cleanMd5} status=${resp.status} responseCode=${data?.responseCode ?? "null"} errorCode=${data?.errorCode ?? "null"}`
         );
       } else {
         console.error(
@@ -809,6 +810,7 @@ async function checkBakongMd5(md5Hash, env) {
       data?.data?.status || data?.status || ""
     ).toUpperCase();
     const paid =
+      responseCode === 0 ||
       statusStr === "PAID" ||
       (responseCode === 0 &&
         Boolean(data?.data) &&
@@ -4461,7 +4463,7 @@ export default {
     }
 
     if (apiPath === "payments/khqr/check-status" && method === "GET") {
-      const md5Hash = url.searchParams.get("md5");
+      const md5Hash = (url.searchParams.get("md5") || "").trim().toLowerCase();
       const forceDebug = url.searchParams.get("debug_bakong") === "1";
       const confirmPaid = url.searchParams.get("confirm") === "1";
       let payRow = await db
@@ -4482,11 +4484,22 @@ export default {
           .first();
         if (ordRow?.payment_status === "paid") alreadyPaid = true;
       }
+
+      // Ensure MD5 hash passed to Bakong API is computed from the exact, raw
+      // KHQR text string rendered on the QR code canvas (without extra whitespace/formatting).
+      let targetMd5 = md5Hash;
+      if (payRow?.gateway_response) {
+        const gw = safeJsonParse(payRow.gateway_response, {});
+        if (gw?.qr && typeof gw.qr === "string" && gw.qr.trim()) {
+          targetMd5 = md5(gw.qr.trim()).toLowerCase();
+        }
+      }
+
       const res =
         confirmPaid || (alreadyPaid && !forceDebug)
           ? { paid: true, http_status: 200, response_code: 0, gateway_error: false }
-          : await checkBakongMd5(md5Hash, env);
-      const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid);
+          : await checkBakongMd5(targetMd5, env);
+      const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid || res.response_code === 0);
       const now = new Date().toISOString();
       if (isPaid && payRow && !alreadyPaid) {
         await db.batch([
@@ -4506,6 +4519,7 @@ export default {
         ? await getOrdersHydrated(db, { orderIdOrNumber: payRow.order_id })
         : [];
       return jsonResponse({
+        responseCode: isPaid ? 0 : (res.response_code ?? 1),
         paid: isPaid,
         status: isPaid
           ? "SUCCESS"

@@ -1,20 +1,33 @@
-Please update the hero/campaign banner component and layout with the following changes:
+To make it work without changing your UI design or interface, you only need to fix the logic behind the scenes.
 
-1. Clean up the Banner Content:
-   - Remove the main title, subtitle, descriptive text, CTA button ("Explore Campaign Deals"), and the 4 feature badge icons (Special Discount, Free Gift, Warranty Support, Fast Delivery).
-   - Remove the toggle control in the top-right corner ("Overlay Shelf | Bottom Carousel").
-   - Remove the "4 Featured Products" badge.
-   - Keep ONLY these 3 badges aligned at the top-left:
-     • "Seasonal Fest"
-     • "20% OFF"
-     • "26d 17h left" (countdown)
+Here is a ready-to-use prompt you can give directly to your AI agent (Cursor, Copilot, ChatGPT, Claude) to patch your code immediately:
 
-2. Fix Banner Responsiveness (Proportional Scaling):
-   - Replace any fixed height (e.g., `h-[...]`, `min-h-[...]`, or static pixel heights) with a CSS `aspect-ratio` (e.g., `aspect-[21/9]` or `aspect-[16/6]` in Tailwind CSS).
-   - Ensure the banner scales both width and height proportionally across all viewport sizes so the background graphic is never distorted or awkwardly cropped.
-   - Scale down the badge padding and font sizes appropriately for mobile viewports.
+Copy-Paste Prompt for your AI Agent
+"I need to fix my Bakong KHQR payment verification logic without altering any UI layout, styling, or visual components.
 
-3. Move "Featured in Pchum Ben" Section to the Bottom:
-   - Extract the featured products shelf from being overlaid inside the banner.
-   - Position it directly beneath the banner container as its own dedicated section (above "Explore Products").
-   - Display the header ("Featured in Pchum Ben" with subtext and "Explore all" link) followed by a 4-column responsive grid/carousel showing the 4 featured product cards with their -20% OFF badges, images, titles, and discount/original prices.
+The Problem:
+When the user pays via mobile banking, the modal stays stuck on 'Checking payment status...' indefinitely. Looking at the Network tab, the frontend is continuously polling /checkout/payment/check-status/?md5={md5} every 1.5 seconds, returning HTTP 200, but never confirming the payment or redirecting.
+
+What to Fix (Keep UI exactly as is):
+
+Response Verification Logic:
+
+In my check handler/hook, ensure that when the check response is received, it correctly triggers the payment success flow.
+
+Check the exact structure: NBC Bakong returns responseCode: 0 on success (e.g. res.responseCode === 0 or res.data.responseCode === 0). Make sure my conditional statement checks for 0 and not a custom string like 'PAID' or 'SUCCESS'.
+
+Polling Loop Control:
+
+Once responseCode === 0 is received, immediately call clearInterval to halt the polling loop and trigger the success redirect/callback.
+
+Adjust the interval timer from 1.5s to 4–5s to avoid exhausting Bakong's daily request quota.
+
+Ensure the interval is cleared when the modal closes or the component unmounts.
+
+MD5 / Backend Check Handler:
+
+Ensure the MD5 hash passed to [https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5](https://api-bakong.nbc.gov.kh/v1/check_transaction_by_md5) is computed from the exact, raw KHQR text string that was rendered on the QR code canvas (without extra whitespace or formatting).
+
+Verify the backend passes the payload as { "md5": "<hash>" } with the Authorization: Bearer <token> header.
+
+Please update the script logic in place without modifying any UI styles or JSX structure."

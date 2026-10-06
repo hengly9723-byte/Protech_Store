@@ -28,13 +28,16 @@ def _payment_response(order, *, paid, status_str,
     Build the standardized polling response the frontend modal consumes:
 
       {
+        "responseCode": 0 | 1,              # NBC Bakong response code (0 = success)
         "paid": bool,                       # true only when Bakong confirms
         "status": "SUCCESS" | "PENDING",    # machine-readable state
         "order": { ...OrderDetailSerializer fields... }
         "bakong_code": int | null           # Bakong response code for debugging
       }
     """
+    code = 0 if paid else (bakong_code if bakong_code is not None else 1)
     data = {
+        'responseCode': code,
         'paid': bool(paid),
         'status': status_str,
         'order': OrderDetailSerializer(order).data,
@@ -332,31 +335,51 @@ class KhqrCheckStatusView(APIView):
     def get(self, request):
         md5_hash = request.query_params.get('md5')
         if not md5_hash:
-            return Response({'error': 'md5 is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'md5 is required.', 'responseCode': 1, 'paid': False}, status=status.HTTP_400_BAD_REQUEST)
 
-        print("Checking Bakong for MD5:", md5_hash)
+        clean_md5 = md5_hash.strip().lower()
+        print("Checking Bakong for MD5:", clean_md5)
 
-        payment = Payment.objects.filter(transaction_id=md5_hash).select_related('order').first()
+        payment = Payment.objects.filter(transaction_id=clean_md5).select_related('order').first()
         if not payment:
-            return Response({'error': 'No payment found for the given md5.'}, status=status.HTTP_404_NOT_FOUND)
+            payment = Payment.objects.filter(transaction_id__iexact=clean_md5).select_related('order').first()
+        if not payment:
+            return Response({'error': 'No payment found for the given md5.', 'responseCode': 1, 'paid': False}, status=status.HTTP_404_NOT_FOUND)
 
         order = payment.order
         if not _can_access_order(order, request):
-            return Response({'error': 'Order not found or not accessible.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': 'Order not found or not accessible.', 'responseCode': 1, 'paid': False}, status=status.HTTP_404_NOT_FOUND)
+
+        # Fast path if already paid
+        if order.payment_status == 'paid' or payment.status == 'paid':
+            return _payment_response(order, paid=True, status_str='SUCCESS', bakong_code=0)
+
+        # Ensure the MD5 hash passed to Bakong API is computed from the exact, raw
+        # KHQR text string rendered on the QR canvas (without extra whitespace/formatting).
+        raw_qr = (payment.gateway_response or {}).get('qr')
+        if raw_qr and isinstance(raw_qr, str) and raw_qr.strip():
+            clean_md5 = hashlib.md5(raw_qr.strip().encode('utf-8')).hexdigest().lower()
 
         try:
-            bakong_response = bakong.check_transaction_status(md5_hash)
+            bakong_response = bakong.check_transaction_status(clean_md5)
             print("Bakong Raw Response:", bakong_response)
 
-            response_code = bakong_response.get('response_code') or (
-                bakong_response.get('raw') or {}
-            ).get('responseCode') if isinstance(bakong_response.get('raw'), dict) else None
-
-            raw = bakong_response.get('raw')
+            raw = bakong_response.get('raw') if isinstance(bakong_response.get('raw'), dict) else {}
+            response_code = bakong_response.get('response_code')
+            if response_code is None and isinstance(raw, dict):
+                response_code = raw.get('responseCode')
 
             print(f"--> Bakong Response Code: {response_code} | Raw: {raw}")
 
-            if response_code == 0 or (isinstance(bakong_response, dict) and bakong_response.get('data', {}).get('responseCode') == 0):
+            # NBC Bakong returns responseCode == 0 on success
+            is_paid = (
+                response_code == 0
+                or bakong_response.get('paid') is True
+                or (isinstance(raw, dict) and raw.get('responseCode') == 0)
+                or (isinstance(bakong_response.get('data'), dict) and bakong_response['data'].get('responseCode') == 0)
+            )
+
+            if is_paid:
                 payment.status = 'paid'
                 payment.paid_at = timezone.now()
                 payment.gateway_response = {
@@ -369,20 +392,12 @@ class KhqrCheckStatusView(APIView):
                 order.status = 'processing'
                 order.save(update_fields=['payment_status', 'status', 'updated_at'])
 
-                return _payment_response(order, paid=True, status_str='SUCCESS', bakong_code=response_code)
+                return _payment_response(order, paid=True, status_str='SUCCESS', bakong_code=0)
             else:
-                return Response({
-                    'paid': False,
-                    'status': 'PENDING',
-                    'order': OrderDetailSerializer(order).data,
-                })
+                return _payment_response(order, paid=False, status_str='PENDING', bakong_code=response_code)
         except Exception as e:
             print("Bakong Exception:", str(e))
-            return Response({
-                'paid': False,
-                'status': 'PENDING',
-                'order': OrderDetailSerializer(order).data,
-            })
+            return _payment_response(order, paid=False, status_str='PENDING', bakong_code=1)
 
 
 class KhqrVerifyView(APIView):
@@ -553,11 +568,14 @@ class CheckPaymentStatusView(APIView):
         if not payment:
             return _payment_response(order, paid=False, status_str='PENDING')
 
-        # --- Use the exact MD5 hash saved during QR generation ---
-        # DO NOT recompute MD5 from QR string - string encoding differences
-        # cause mismatched hashes. Use the exact transaction_id (MD5) returned
-        # by the Bakong SDK and saved to the payment record.
-        md5_hash = payment.transaction_id
+        # --- Ensure MD5 hash is computed from exact raw KHQR text string ---
+        raw_qr = (payment.gateway_response or {}).get('qr')
+        if raw_qr and isinstance(raw_qr, str) and raw_qr.strip():
+            md5_hash = hashlib.md5(raw_qr.strip().encode('utf-8')).hexdigest().lower()
+        elif payment.transaction_id:
+            md5_hash = payment.transaction_id.strip().lower()
+        elif md5_hash:
+            md5_hash = md5_hash.strip().lower()
 
         console_log = f"--> Querying Bakong MD5: {md5_hash}"
         logger.info(console_log)

@@ -4,7 +4,7 @@ import { checkKhqrStatusApi, getGuestEmail } from "../../services/api";
 import { formatMoney } from "../../utils/format";
 import bakongLogo from "../../assets/image.png";
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 5000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 const BAKONG_APP_STORE = "https://apps.apple.com/kh/app/bakong/id1440829141";
@@ -15,9 +15,9 @@ const BAKONG_PLAY_STORE =
  * Bakong KHQR payment modal.
  *
  * Displays the generated Bakong QR code and polls
- * /api/payments/khqr/check-status/ every 3 seconds until Bakong reports the
- * transaction as PAID (paid === true, status === 'SUCCESS', or responseCode === 0),
- * then calls onPaid(order) so the parent can redirect to the confirmation page.
+ * /api/payments/khqr/check-status/ every 4-5 seconds until Bakong reports the
+ * transaction as PAID (responseCode === 0, paid === true, or status === 'SUCCESS'),
+ * then immediately stops polling and calls onPaid(order) so the parent can redirect.
  *
  * The polling loop lives in a single useEffect keyed on md5. The status
  * callback is referentially stable (latest values via refs) so the effect never
@@ -60,6 +60,11 @@ const KhqrPaymentModal = ({
     }
   }, []);
 
+  const handleModalClose = useCallback(() => {
+    stopPolling();
+    if (onClose) onClose();
+  }, [stopPolling, onClose]);
+
   const handlePaid = useCallback(
     (paidOrder) => {
       stopPolling();
@@ -89,15 +94,34 @@ const KhqrPaymentModal = ({
       failureCountRef.current = 0;
       setPollPaused(false);
 
-      const paid =
-        res.data?.paid === true ||
-        res.data?.status === "SUCCESS" ||
-        res.data?.status === "PAID" ||
-        res.data?.responseCode === 0;
+      const responsePayload = res?.data || res || {};
+      const resData = responsePayload.data || {};
+
+      // NBC Bakong returns responseCode: 0 on success
+      // (e.g. res.responseCode === 0, res.data.responseCode === 0, or res.data.data.responseCode === 0).
+      const responseCode =
+        responsePayload.responseCode ??
+        res?.responseCode ??
+        resData.responseCode ??
+        responsePayload.bakong_response_code ??
+        responsePayload.bakong_code ??
+        null;
+
+      const isSuccessCode = responseCode === 0 || responseCode === "0";
+      const isPaidFlag =
+        responsePayload.paid === true ||
+        responsePayload.status === "SUCCESS" ||
+        responsePayload.status === "PAID" ||
+        resData.status === "PAID";
+
+      const paid = isSuccessCode || isPaidFlag;
 
       if (paid) {
-        handlePaid(res.data.order || orderRef.current);
-      } else if (res.data?.status === "FAILED") {
+        // Once responseCode === 0 is received, immediately halt the polling loop and trigger success flow
+        stopPolling();
+        handlePaid(responsePayload.order || resData.order || orderRef.current);
+        return;
+      } else if (responsePayload.status === "FAILED" || responsePayload.error_code === "TRANSACTION_FAILED") {
         stopPolling();
         setPollPaused(true);
         setCheckError(
@@ -141,7 +165,7 @@ const KhqrPaymentModal = ({
     }
   }, [handlePaid, stopPolling]);
 
-  // Automatic payment completion polling: check every 3 seconds until paid.
+  // Automatic payment completion polling: check every 4-5 seconds until paid.
   useEffect(() => {
     if (!md5) return undefined;
 
@@ -152,8 +176,17 @@ const KhqrPaymentModal = ({
     intervalRef.current = interval;
     checkStatus();
 
-    return stopPolling;
+    return () => {
+      stopPolling();
+    };
   }, [md5, checkStatus, stopPolling]);
+
+  // Always ensure interval timer is cleared when component unmounts
+  useEffect(() => {
+    return () => {
+      stopPolling();
+    };
+  }, [stopPolling]);
 
   const resumePolling = useCallback(() => {
     failureCountRef.current = 0;
@@ -232,7 +265,7 @@ const KhqrPaymentModal = ({
           </h3>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleModalClose}
             disabled={isPaid}
             className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-40"
           >
@@ -300,7 +333,7 @@ const KhqrPaymentModal = ({
                   ? "Checking payment status..."
                   : pollPaused
                     ? "Automatic checking paused."
-                    : "Waiting for payment. Checking every 3 seconds..."}
+                    : "Waiting for payment. Checking every 5 seconds..."}
               </p>
             </div>
 
@@ -324,7 +357,7 @@ const KhqrPaymentModal = ({
               ) : (
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={handleModalClose}
                   className="w-full py-2.5 rounded-2xl border border-gray-200 hover:border-rose-300 hover:bg-rose-50 text-gray-600 hover:text-rose-700 text-sm font-semibold transition-colors cursor-pointer"
                 >
                   Cancel Payment

@@ -472,10 +472,11 @@ def _do_check_transaction(md5_hash, token, base_url, timeout=10):
     Raises BakongAPIError on other network/HTTP errors.
     """
     url = f"{base_url.rstrip('/')}/v1/check_transaction_by_md5"
+    clean_md5 = str(md5_hash).strip().lower()
     try:
         response = requests.post(
             url,
-            json={'md5': md5_hash},
+            json={'md5': clean_md5},
             headers=_auth_headers(token),
             timeout=timeout,
         )
@@ -585,8 +586,7 @@ def check_transaction_status(md5_hash, timeout=10):
     #   responseCode == 0                     → transaction found and PAID
     #   responseCode == 1, errorCode == 1     → transaction not found yet
     #   responseCode == 1, errorCode == 3     → transaction explicitly failed
-    # A paid response always has responseCode==0 AND data is non-null.
-    paid = (response_code == 0) and bool(data.get('data'))
+    paid = (response_code == 0)
     not_found = (error_code == BAKONG_ERROR_NOT_FOUND)
     failed = (error_code == BAKONG_ERROR_FAILED)
     return {
