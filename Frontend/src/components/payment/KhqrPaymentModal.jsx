@@ -37,10 +37,16 @@ const KhqrPaymentModal = ({
   const [status, setStatus] = useState("pending"); // pending | checking | paid
   const [checkError, setCheckError] = useState(null);
   const [pollPaused, setPollPaused] = useState(false);
+  const [isMockMode, setIsMockMode] = useState(
+    () => import.meta.env.VITE_BAKONG_MOCK_MODE === "true" || import.meta.env.DEV
+  );
+  const [simulating, setSimulating] = useState(false);
 
   const intervalRef = useRef(null);
   const checkingRef = useRef(false);
   const failureCountRef = useRef(0);
+  const pollCountRef = useRef(0);
+  const MAX_POLL_COUNT = 30; // 30 checks * 5s = 2.5 minutes
 
   // Latest values via refs so checkStatus stays referentially stable and the
   // polling effect never re-runs (which is what caused the infinite loop).
@@ -116,11 +122,28 @@ const KhqrPaymentModal = ({
 
       const paid = isSuccessCode || isPaidFlag;
 
+      if (responsePayload.mock_mode) {
+        setIsMockMode(true);
+      }
+
       if (paid) {
         // Once responseCode === 0 is received, immediately halt the polling loop and trigger success flow
         stopPolling();
         handlePaid(responsePayload.order || resData.order || orderRef.current);
         return;
+      } else if (
+        responsePayload.status === "LIMIT_EXCEEDED" ||
+        responsePayload.status === "GATEWAY_ERROR" ||
+        responsePayload.error_code === "BAKONG_DAILY_LIMIT_EXCEEDED" ||
+        responsePayload.bakong_code === 17
+      ) {
+        stopPolling();
+        setPollPaused(true);
+        setIsMockMode(true);
+        setCheckError(
+          responsePayload.error ||
+          "Bakong Open API daily request quota (100 calls) has been reached for today. Automatic checking is paused."
+        );
       } else if (responsePayload.status === "FAILED" || responsePayload.error_code === "TRANSACTION_FAILED") {
         stopPolling();
         setPollPaused(true);
@@ -128,7 +151,16 @@ const KhqrPaymentModal = ({
           "Payment was declined or failed. Please check your transaction and try again.",
         );
       } else {
-        setStatus("pending");
+        pollCountRef.current += 1;
+        if (pollCountRef.current >= MAX_POLL_COUNT) {
+          stopPolling();
+          setPollPaused(true);
+          setCheckError(
+            "Automatic checking paused to conserve Bakong API quota. Click 'Check status now' to verify.",
+          );
+        } else {
+          setStatus("pending");
+        }
       }
     } catch (err) {
       failureCountRef.current += 1;
@@ -190,6 +222,7 @@ const KhqrPaymentModal = ({
 
   const resumePolling = useCallback(() => {
     failureCountRef.current = 0;
+    pollCountRef.current = 0;
     setPollPaused(false);
     setCheckError(null);
     checkStatus();
@@ -197,6 +230,32 @@ const KhqrPaymentModal = ({
       intervalRef.current = setInterval(() => checkStatus(), POLL_INTERVAL_MS);
     }
   }, [checkStatus]);
+
+  const handleSimulatePayment = useCallback(async () => {
+    const md5Value = md5Ref.current;
+    if (!md5Value || statusRef.current === "paid") return;
+    setSimulating(true);
+    setCheckError(null);
+    try {
+      const params = { simulate: "true" };
+      const guestEmail = getGuestEmail();
+      if (guestEmail) params.guest_email = guestEmail;
+      const res = await checkKhqrStatusApi(md5Value, params);
+      const responsePayload = res?.data || res || {};
+      const resData = responsePayload.data || {};
+      if (responsePayload.paid || responsePayload.responseCode === 0) {
+        stopPolling();
+        handlePaid(responsePayload.order || resData.order || orderRef.current);
+      } else {
+        setCheckError("Simulation failed or order not found.");
+      }
+    } catch (e) {
+      console.error("Payment simulation error:", e);
+      setCheckError("Payment simulation failed.");
+    } finally {
+      setSimulating(false);
+    }
+  }, [handlePaid, stopPolling]);
 
   const isPaid = status === "paid";
   const isChecking = status === "checking";
@@ -345,16 +404,42 @@ const KhqrPaymentModal = ({
             )}
 
             <div className="mt-4 flex flex-col gap-2">
+              {isMockMode && (
+                <button
+                  type="button"
+                  onClick={handleSimulatePayment}
+                  disabled={simulating || isPaid}
+                  className="w-full py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {simulating ? (
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <i className="bi bi-lightning-charge-fill" />
+                  )}
+                  Simulate Payment (Dev Mode)
+                </button>
+              )}
+
               {pollPaused ? (
                 <button
                   type="button"
                   onClick={resumePolling}
-                  className="w-full py-2.5 rounded-2xl border border-amber-300 hover:border-amber-400 hover:bg-amber-50 text-amber-700 text-sm font-semibold transition-colors cursor-pointer"
+                  className="w-full py-2.5 rounded-2xl border border-amber-300 hover:border-amber-400 hover:bg-amber-50 text-amber-700 text-sm font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
                 >
-                  <i className="bi bi-play-circle mr-1" />
-                  Resume automatic checking
+                  <i className="bi bi-arrow-repeat text-base" />
+                  Check status now
                 </button>
               ) : (
+                <button
+                  type="button"
+                  onClick={handleModalClose}
+                  className="w-full py-2.5 rounded-2xl border border-gray-200 hover:border-rose-300 hover:bg-rose-50 text-gray-600 hover:text-rose-700 text-sm font-semibold transition-colors cursor-pointer"
+                >
+                  Cancel Payment
+                </button>
+              )}
+
+              {pollPaused && (
                 <button
                   type="button"
                   onClick={handleModalClose}

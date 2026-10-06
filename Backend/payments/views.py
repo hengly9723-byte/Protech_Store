@@ -2,6 +2,7 @@ import hashlib
 import logging
 import time
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -20,6 +21,7 @@ ERROR_CODE_AUTH_CONFIG = 'AUTH_CONFIG_ERROR'
 ERROR_CODE_BAKONG_API = 'BAKONG_API_ERROR'
 ERROR_CODE_TRANSACTION_NOT_FOUND = 'TRANSACTION_NOT_FOUND'
 ERROR_CODE_INTERNAL = 'INTERNAL_ERROR'
+ERROR_CODE_DAILY_LIMIT = 'BAKONG_DAILY_LIMIT_EXCEEDED'
 
 
 def _payment_response(order, *, paid, status_str,
@@ -166,6 +168,18 @@ def _poll_payment_status(payment, md5_hash):
     # parsed from the spec-correct responseCode / errorCode fields.
     raw_code = result.get('response_code') or (raw.get('responseCode') if isinstance(raw, dict) else None)
     raw_message = (raw.get('responseMessage') or '') if isinstance(raw, dict) else ''
+
+    if result.get('limit_exceeded') or result.get('error_code') == 17:
+        return Response({
+            'paid': False,
+            'status': 'LIMIT_EXCEEDED',
+            'error_code': ERROR_CODE_DAILY_LIMIT,
+            'error': result.get('error_message') or 'Daily request limit of 100 exceeded on Bakong Open API. Please try again tomorrow.',
+            'response_code': raw_code or 1,
+            'responseCode': 1,
+            'bakong_code': 17,
+            'order': OrderDetailSerializer(order).data,
+        }, status=status.HTTP_200_OK)
 
     if result.get('not_found'):
         return _pending_response(
@@ -360,6 +374,17 @@ class KhqrCheckStatusView(APIView):
         if raw_qr and isinstance(raw_qr, str) and raw_qr.strip():
             clean_md5 = hashlib.md5(raw_qr.strip().encode('utf-8')).hexdigest().lower()
 
+        # Mock Mode simulation: if BAKONG_MOCK_MODE is enabled, allow instant test confirmation
+        if (request.query_params.get('simulate') == 'true' or request.query_params.get('mock') == 'true') and getattr(settings, 'BAKONG_MOCK_MODE', False):
+            payment.status = 'paid'
+            payment.paid_at = timezone.now()
+            payment.gateway_response = {**(payment.gateway_response or {}), 'mock': True}
+            payment.save()
+            order.payment_status = 'paid'
+            order.status = 'processing'
+            order.save(update_fields=['payment_status', 'status', 'updated_at'])
+            return _payment_response(order, paid=True, status_str='SUCCESS', bakong_code=0)
+
         try:
             bakong_response = bakong.check_transaction_status(clean_md5)
             print("Bakong Raw Response:", bakong_response)
@@ -369,7 +394,28 @@ class KhqrCheckStatusView(APIView):
             if response_code is None and isinstance(raw, dict):
                 response_code = raw.get('responseCode')
 
-            print(f"--> Bakong Response Code: {response_code} | Raw: {raw}")
+            error_code = bakong_response.get('error_code')
+            if error_code is None and isinstance(raw, dict):
+                error_code = raw.get('errorCode')
+
+            print(f"--> Bakong Response Code: {response_code} | Error Code: {error_code} | Raw: {raw}")
+
+            # NBC Bakong daily quota limit exceeded (errorCode 17)
+            if error_code == 17 or bakong_response.get('limit_exceeded'):
+                msg = (
+                    bakong_response.get('error_message')
+                    or 'Daily request limit of 100 exceeded on Bakong Open API. Please try again tomorrow.'
+                )
+                return Response({
+                    'paid': False,
+                    'status': 'LIMIT_EXCEEDED',
+                    'error_code': ERROR_CODE_DAILY_LIMIT,
+                    'error': msg,
+                    'responseCode': 1,
+                    'bakong_code': 17,
+                    'mock_mode': getattr(settings, 'BAKONG_MOCK_MODE', False),
+                    'order': OrderDetailSerializer(order).data,
+                }, status=status.HTTP_200_OK)
 
             # NBC Bakong returns responseCode == 0 on success
             is_paid = (
@@ -459,6 +505,18 @@ class KhqrVerifyView(APIView):
                 paid=True,
                 status_str='SUCCESS',
             )
+
+        # Mock Mode simulation support in verify endpoint
+        if request.data.get('simulate') is True and getattr(settings, 'BAKONG_MOCK_MODE', False):
+            if payment:
+                payment.status = 'paid'
+                payment.paid_at = timezone.now()
+                payment.gateway_response = {**(payment.gateway_response or {}), 'mock': True}
+                payment.save()
+            order.payment_status = 'paid'
+            order.status = 'processing'
+            order.save(update_fields=['payment_status', 'status', 'updated_at'])
+            return _payment_response(order, paid=True, status_str='SUCCESS', bakong_code=0)
 
         if not md5_hash or not payment:
             return _payment_response(
@@ -623,7 +681,16 @@ class CheckPaymentStatusView(APIView):
                 'Payment %s (md5=%s) confirmed PAID. Order %s moved to processing.',
                 payment.id, md5_hash, order.id,
             )
-            return _payment_response(order, paid=True, status_str='PAID', bakong_code=response_code)
+        elif bakongResponse.get('limit_exceeded') or raw.get('errorCode') == 17:
+            return Response({
+                'paid': False,
+                'status': 'LIMIT_EXCEEDED',
+                'error_code': ERROR_CODE_DAILY_LIMIT,
+                'error': bakongResponse.get('error_message') or 'Daily request limit of 100 exceeded on Bakong Open API.',
+                'responseCode': 1,
+                'bakong_code': 17,
+                'order': OrderDetailSerializer(order).data,
+            }, status=status.HTTP_200_OK)
         else:
             # Transaction pending or not yet found (KHQR returns "payment not found!")
             return _payment_response(order, paid=False, status_str='PENDING')

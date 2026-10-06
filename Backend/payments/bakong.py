@@ -98,6 +98,7 @@ TOKEN_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60  # warn when < 7 days remain
 BAKONG_ERROR_NOT_FOUND = 1    # Transaction not found / pending
 BAKONG_ERROR_FAILED = 3       # Transaction explicitly failed
 BAKONG_ERROR_UNAUTHORIZED = 6 # Token invalid/expired → trigger renewal
+BAKONG_ERROR_DAILY_LIMIT = 17 # Daily request limit of 100 exceeded
 
 
 def _jwt_expiry(token):
@@ -586,13 +587,16 @@ def check_transaction_status(md5_hash, timeout=10):
     #   responseCode == 0                     → transaction found and PAID
     #   responseCode == 1, errorCode == 1     → transaction not found yet
     #   responseCode == 1, errorCode == 3     → transaction explicitly failed
+    #   responseCode == 1, errorCode == 17    → daily quota exceeded
     paid = (response_code == 0)
     not_found = (error_code == BAKONG_ERROR_NOT_FOUND)
     failed = (error_code == BAKONG_ERROR_FAILED)
+    limit_exceeded = (error_code == BAKONG_ERROR_DAILY_LIMIT)
     return {
         'paid': paid,
         'not_found': not_found,
         'failed': failed,
+        'limit_exceeded': limit_exceeded,
         'response_code': response_code,
         'error_code': error_code,
         'error_message': message,
@@ -724,6 +728,17 @@ def verify_bakong_payment(payment_instance):
     raw = result.get('raw') or {}
     raw_code = raw.get('responseCode') if isinstance(raw, dict) else None
     raw_message = (raw.get('responseMessage') or '') if isinstance(raw, dict) else ''
+
+    # Daily request limit exceeded (errorCode 17)
+    if result.get('limit_exceeded') or result.get('error_code') == BAKONG_ERROR_DAILY_LIMIT:
+        return {
+            'paid': False,
+            'status': 'LIMIT_EXCEEDED',
+            'error': result.get('error_message') or 'Daily request limit of 100 exceeded on Bakong Open API. Please try again tomorrow.',
+            'error_code': 'BAKONG_DAILY_LIMIT_EXCEEDED',
+            'response_code': raw_code,
+            'response_message': raw_message or 'Daily request limit of 100 exceeded on Bakong Open API.',
+        }
 
     # Transaction explicitly failed (errorCode 3)
     if result.get('failed'):

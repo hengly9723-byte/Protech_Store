@@ -38,8 +38,8 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
 VERIFICATION_TOKEN_EXPIRY_SECONDS = int(os.getenv('VERIFICATION_TOKEN_EXPIRY_SECONDS', 86400))
 
 # Bakong PayWay / KHQR credentials (kept server-side, never sent to the browser).
-BAKONG_MERCHANT_ID = os.getenv('BAKONG_MERCHANT_ID', 'ly_sokheng1@bkrt')
-BAKONG_MERCHANT_NAME = os.getenv('BAKONG_MERCHANT_NAME', 'SOKHENG LY')
+BAKONG_MERCHANT_ID = os.getenv('BAKONG_MERCHANT_ID') or os.getenv('BAKONG_ACCOUNT_USERNAME', 'ly_sokheng1@bkrt')
+BAKONG_MERCHANT_NAME = os.getenv('BAKONG_MERCHANT_NAME') or os.getenv('BAKONG_ACCOUNT_NAME', 'SOKHENG LY')
 BAKONG_MERCHANT_CITY = os.getenv('BAKONG_MERCHANT_CITY', 'PHNOM PENH')
 # Sandbox (testing only): https://sit-api-bakong.nbc.gov.kh
 # Production (real payments): https://api-bakong.nbc.gov.kh
@@ -56,6 +56,9 @@ BAKONG_TOKEN = os.getenv('BAKONG_TOKEN', '')
 # Registered email address for the Bakong developer account.
 # Required for automatic token renewal via POST /v1/renew_token.
 BAKONG_EMAIL = os.getenv('BAKONG_EMAIL', '')
+
+# Mock mode: allow developer payment simulation when NBC limits are hit or in local development
+BAKONG_MOCK_MODE = os.getenv('BAKONG_MOCK_MODE', 'False').lower() in ('true', '1', 't')
 
 # ---------------------------------------------------------------------------
 # Startup alert for Bakong auth configuration. Runs once at process startup so

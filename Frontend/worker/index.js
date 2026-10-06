@@ -4465,7 +4465,10 @@ export default {
     if (apiPath === "payments/khqr/check-status" && method === "GET") {
       const md5Hash = (url.searchParams.get("md5") || "").trim().toLowerCase();
       const forceDebug = url.searchParams.get("debug_bakong") === "1";
-      const confirmPaid = url.searchParams.get("confirm") === "1";
+      const confirmPaid =
+        url.searchParams.get("confirm") === "1" ||
+        url.searchParams.get("simulate") === "true" ||
+        url.searchParams.get("simulate") === "1";
       let payRow = await db
         .prepare("SELECT * FROM payments WHERE transaction_id = ? LIMIT 1")
         .bind(md5Hash)
@@ -4500,6 +4503,8 @@ export default {
           ? { paid: true, http_status: 200, response_code: 0, gateway_error: false }
           : await checkBakongMd5(targetMd5, env);
       const isPaid = Boolean(alreadyPaid || confirmPaid || res.paid || res.response_code === 0);
+      const isLimitExceeded =
+        res.error_code === "BAKONG_DAILY_LIMIT_EXCEEDED" || res.bakong_error_code === 17;
       const now = new Date().toISOString();
       if (isPaid && payRow && !alreadyPaid) {
         await db.batch([
@@ -4523,6 +4528,8 @@ export default {
         paid: isPaid,
         status: isPaid
           ? "SUCCESS"
+          : isLimitExceeded
+          ? "LIMIT_EXCEEDED"
           : res.failed
           ? "FAILED"
           : res.gateway_error
@@ -4530,6 +4537,7 @@ export default {
           : "PENDING",
         error: res.gateway_error || res.failed ? res.error_message : null,
         error_code: res.error_code ?? null,
+        bakong_code: res.bakong_error_code ?? (isPaid ? 0 : (res.response_code ?? 1)),
         bakong_http_status: res.http_status ?? null,
         bakong_response_code: res.response_code ?? null,
         bakong_error_code: res.bakong_error_code ?? null,
